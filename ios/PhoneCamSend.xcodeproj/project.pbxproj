@@ -1,0 +1,400 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1A1100012C4BAA0100111111 /* PhoneCamSendApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100112C4BAA0100111111 /* PhoneCamSendApp.swift */; };
+		1A1100022C4BAA0200111111 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100122C4BAA0200111111 /* ContentView.swift */; };
+		1A1100032C4BAA0300111111 /* CaptureEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100132C4BAA0300111111 /* CaptureEncoder.swift */; };
+		1A1100042C4BAA0400111111 /* RtpSwiftPacketizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100142C4BAA0400111111 /* RtpSwiftPacketizer.swift */; };
+		1A1100052C4BAA0500111111 /* ControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100152C4BAA0500111111 /* ControlClient.swift */; };
+		1A1100062C4BAA0600111111 /* StreamController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100162C4BAA0600111111 /* StreamController.swift */; };
+		1A1100072C4BAA0700111111 /* UdpStreamSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100172C4BAA0700111111 /* UdpStreamSender.swift */; };
+		1A1100082C4BAA0800111111 /* PhoneCamSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100182C4BAA0800111111 /* PhoneCamSendTests.swift */; };
+		1A1100092C4BAA0900111111 /* RtpSwiftPacketizer.swift in Sources for Tests */ = {isa = PBXBuildFile; fileRef = 1A1100142C4BAA0400111111 /* RtpSwiftPacketizer.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		1A1100202C4BAA2000111111 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A1111111111111111111111 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1A1111111111111111111113;
+			remoteInfo = PhoneCamSend;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		1A1111112C4BA11100111111 /* PhoneCamSend.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhoneCamSend.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A1111122C4BA11200111111 /* PhoneCamSendTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhoneCamSendTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A1100112C4BAA0100111111 /* PhoneCamSendApp.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PhoneCamSendApp.swift; sourceTree = "<group>"; };
+		1A1100122C4BAA0200111111 /* ContentView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		1A1100132C4BAA0300111111 /* CaptureEncoder.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = CaptureEncoder.swift; sourceTree = "<group>"; };
+		1A1100142C4BAA0400111111 /* RtpSwiftPacketizer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = RtpSwiftPacketizer.swift; sourceTree = "<group>"; };
+		1A1100152C4BAA0500111111 /* ControlClient.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ControlClient.swift; sourceTree = "<group>"; };
+		1A1100162C4BAA0600111111 /* StreamController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = StreamController.swift; sourceTree = "<group>"; };
+		1A1100172C4BAA0700111111 /* UdpStreamSender.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = UdpStreamSender.swift; sourceTree = "<group>"; };
+		1A1100182C4BAA0800111111 /* PhoneCamSendTests.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PhoneCamSendTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1A1111212C4BA22100111111 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A1111222C4BA22200111111 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1A1111111111111111111112 /* Main Group */ = {
+			isa = PBXGroup;
+			children = (
+				1A1111111111111111111115 /* PhoneCamSend */,
+				1A1111111111111111111116 /* PhoneCamSendTests */,
+				1A1111111111111111111117 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		1A1111111111111111111115 /* PhoneCamSend */ = {
+			isa = PBXGroup;
+			children = (
+				1A1100112C4BAA0100111111 /* PhoneCamSendApp.swift */,
+				1A1100122C4BAA0200111111 /* ContentView.swift */,
+				1A1100132C4BAA0300111111 /* CaptureEncoder.swift */,
+				1A1100142C4BAA0400111111 /* RtpSwiftPacketizer.swift */,
+				1A1100152C4BAA0500111111 /* ControlClient.swift */,
+				1A1100162C4BAA0600111111 /* StreamController.swift */,
+				1A1100172C4BAA0700111111 /* UdpStreamSender.swift */,
+			);
+			path = PhoneCamSend;
+			sourceTree = "<group>";
+		};
+		1A1111111111111111111116 /* PhoneCamSendTests */ = {
+			isa = PBXGroup;
+			children = (
+				1A1100182C4BAA0800111111 /* PhoneCamSendTests.swift */,
+			);
+			path = PhoneCamSendTests;
+			sourceTree = "<group>";
+		};
+		1A1111111111111111111117 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1A1111112C4BA11100111111 /* PhoneCamSend.app */,
+				1A1111122C4BA11200111111 /* PhoneCamSendTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1A1111111111111111111113 /* PhoneCamSend */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A1111312C4BA33100111111 /* Build configuration list for PBXNativeTarget "PhoneCamSend" */;
+			buildPhases = (
+				1A1111412C4BA44100111111 /* Sources */,
+				1A1111212C4BA22100111111 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PhoneCamSend;
+			productName = PhoneCamSend;
+			productReference = 1A1111112C4BA11100111111 /* PhoneCamSend.app */;
+			productType = "com.apple.product-type.application";
+		};
+		1A1111111111111111111114 /* PhoneCamSendTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A1111322C4BA33200111111 /* Build configuration list for PBXNativeTarget "PhoneCamSendTests" */;
+			buildPhases = (
+				1A1111422C4BA44200111111 /* Sources */,
+				1A1111222C4BA22200111111 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1A1100212C4BAA2100111111 /* PBXTargetDependency */,
+			);
+			name = PhoneCamSendTests;
+			productName = PhoneCamSendTests;
+			productReference = 1A1111122C4BA11200111111 /* PhoneCamSendTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End NativeTarget section */
+
+/* Begin PBXProject section */
+		1A1111111111111111111111 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					1A1111111111111111111113 = {
+						CreatedOnToolsVersion = 15.0;
+						LastSwiftMigration = 1500;
+					};
+					1A1111111111111111111114 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = 1A1111332C4BA33300111111 /* Build configuration list for PBXProject "PhoneCamSend" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 1A1111111111111111111112 /* Main Group */;
+			productRefGroup = 1A1111111111111111111117 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1A1111111111111111111113 /* PhoneCamSend */,
+				1A1111111111111111111114 /* PhoneCamSendTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1A1111412C4BA44100111111 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A1100012C4BAA0100111111 /* PhoneCamSendApp.swift in Sources */,
+				1A1100022C4BAA0200111111 /* ContentView.swift in Sources */,
+				1A1100032C4BAA0300111111 /* CaptureEncoder.swift in Sources */,
+				1A1100042C4BAA0400111111 /* RtpSwiftPacketizer.swift in Sources */,
+				1A1100052C4BAA0500111111 /* ControlClient.swift in Sources */,
+				1A1100062C4BAA0600111111 /* StreamController.swift in Sources */,
+				1A1100072C4BAA0700111111 /* UdpStreamSender.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A1111422C4BA44200111111 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A1100092C4BAA0900111111 /* RtpSwiftPacketizer.swift in Sources for Tests */,
+				1A1100082C4BAA0800111111 /* PhoneCamSendTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		1A1100212C4BAA2100111111 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1A1111111111111111111113 /* PhoneCamSend */;
+			targetProxy = 1A1100202C4BAA2000111111 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1A1111512C4BA55100111111 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_IDENTITY = "";
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = PhoneCamSend;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Camera access required to stream";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.phonecam.PhoneCamSend;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1A1111522C4BA55200111111 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_IDENTITY = "";
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = PhoneCamSend;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Camera access required to stream";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.phonecam.PhoneCamSend;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		1A1111532C4BA55300111111 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_IDENTITY = "";
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phonecam.PhoneCamSendTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGET_HOST = "$(BUILT_PRODUCTS_DIR)/PhoneCamSend.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PhoneCamSend";
+				TEST_HOST = "$(TARGET_HOST)";
+			};
+			name = Debug;
+		};
+		1A1111542C4BA55400111111 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_IDENTITY = "";
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.phonecam.PhoneCamSendTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGET_HOST = "$(BUILT_PRODUCTS_DIR)/PhoneCamSend.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PhoneCamSend";
+				TEST_HOST = "$(TARGET_HOST)";
+			};
+			name = Release;
+		};
+		1A1111552C4BA55500111111 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		1A1111562C4BA55600111111 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1A1111312C4BA33100111111 /* Build configuration list for PBXNativeTarget "PhoneCamSend" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A1111512C4BA55100111111 /* Debug */,
+				1A1111522C4BA55200111111 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A1111322C4BA33200111111 /* Build configuration list for PBXNativeTarget "PhoneCamSendTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A1111532C4BA55300111111 /* Debug */,
+				1A1111542C4BA55400111111 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A1111332C4BA33300111111 /* Build configuration list for PBProject "PhoneCamSend" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A1111552C4BA55500111111 /* Debug */,
+				1A1111562C4BA55600111111 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1A1111111111111111111111 /* Project object */;
+}

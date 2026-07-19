@@ -1,0 +1,201 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static-contracts:
+    name: Static packaging contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check shell script syntax
+        run: bash -n scripts/build_android_debug.sh scripts/smoke_receiver_fixture.sh scripts/mac_receiver_dev_smoke.sh scripts/mac_receiver_fixture_smoke.sh scripts/package_mac_receiver_app.sh scripts/local_verification.sh scripts/android_device_smoke.sh scripts/android_rtsp_receiver_smoke.sh scripts/android_wifi_receiver_smoke.sh scripts/android_wifi_profile_matrix_smoke.sh
+
+      - name: Check Android rotation planning
+        run: ROTATION_PLAN_SELF_TEST=1 scripts/android_wifi_receiver_smoke.sh
+
+  android:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Run unit tests and build debug APK
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonecam-android-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  windows-receiver:
+    name: Windows receiver
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Check PowerShell script syntax
+        shell: pwsh
+        run: |
+          $scripts = Get-ChildItem -Path desktop/windows/scripts -Filter *.ps1
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              foreach ($errorItem in $errors) {
+                Write-Error "$($script.FullName): $($errorItem.Message)"
+              }
+              throw "PowerShell syntax check failed for $($script.FullName)"
+            }
+          }
+
+      - name: Locate vcpkg
+        shell: pwsh
+        run: |
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            $env:VCPKG_INSTALLATION_ROOT = "C:\vcpkg"
+          }
+          $toolchain = Join-Path $env:VCPKG_INSTALLATION_ROOT "scripts\buildsystems\vcpkg.cmake"
+          if (-not (Test-Path $toolchain)) {
+            throw "vcpkg toolchain not found at $toolchain"
+          }
+          "VCPKG_INSTALLATION_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Configure receiver
+        shell: pwsh
+        run: |
+          cmake -S desktop/windows -B build/windows-receiver `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DPHONECAM_WITH_SOFTCAM=OFF
+
+      - name: Build receiver
+        shell: pwsh
+        run: cmake --build build/windows-receiver --config Release
+
+      - name: Run receiver CTest suite
+        shell: pwsh
+        run: ctest --test-dir build/windows-receiver -C Release --output-on-failure
+
+      - name: Upload receiver binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonecam-windows-receiver-preview-only
+          path: build/windows-receiver/Release/phonecam-receiver.exe
+
+  mac-receiver:
+    name: macOS receiver dev build
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
+      - name: Configure receiver
+        run: |
+          cmake -S desktop/windows -B build/macos-receiver \
+            -DFFMPEG_ROOT="$(brew --prefix ffmpeg)" \
+            -DPHONECAM_WITH_SOFTCAM=OFF
+
+      - name: Build receiver
+        run: cmake --build build/macos-receiver --config Release
+
+      - name: Run receiver CTest suite
+        run: ctest --test-dir build/macos-receiver -C Release --output-on-failure
+
+      - name: Package macOS dev receiver app
+        run: |
+          RECEIVER_BIN=build/macos-receiver/phonecam-receiver \
+            OUTPUT_DIR=dist/PhoneCam-Mac \
+            scripts/package_mac_receiver_app.sh
+
+      - name: Upload macOS dev receiver
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonecam-macos-dev-receiver
+          path: |
+            build/macos-receiver/phonecam-receiver
+            dist/PhoneCam-Mac/PhoneCam Receiver.app/**
+
+  windows-softcam-receiver:
+    name: Windows receiver with Softcam
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Locate vcpkg
+        shell: pwsh
+        run: |
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            $env:VCPKG_INSTALLATION_ROOT = "C:\vcpkg"
+          }
+          $toolchain = Join-Path $env:VCPKG_INSTALLATION_ROOT "scripts\buildsystems\vcpkg.cmake"
+          if (-not (Test-Path $toolchain)) {
+            throw "vcpkg toolchain not found at $toolchain"
+          }
+          "VCPKG_INSTALLATION_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build PhoneCam-branded Softcam
+        shell: pwsh
+        run: |
+          .\desktop\windows\scripts\Prepare-PhoneCamSoftcam.ps1 `
+            -Destination "$env:RUNNER_TEMP\phonecam-softcam"
+
+      - name: Configure receiver with Softcam
+        shell: pwsh
+        run: |
+          cmake -S desktop/windows -B build/windows-softcam-receiver `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DSOFTCAM_ROOT="$env:RUNNER_TEMP\phonecam-softcam" `
+            -DPHONECAM_WITH_SOFTCAM=ON `
+            -DPHONECAM_REQUIRE_SOFTCAM=ON
+
+      - name: Build receiver with Softcam
+        shell: pwsh
+        run: cmake --build build/windows-softcam-receiver --config Release
+
+      - name: Run Softcam-linked receiver CTest suite
+        shell: pwsh
+        run: ctest --test-dir build/windows-softcam-receiver -C Release --output-on-failure
+
+      - name: Upload Softcam-linked receiver binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonecam-windows-receiver-softcam
+          path: build/windows-softcam-receiver/Release/phonecam-receiver.exe

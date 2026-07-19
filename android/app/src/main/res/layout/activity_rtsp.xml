@@ -5,289 +5,376 @@
     android:layout_height="match_parent"
     android:background="#FF000000">
 
-    <!-- Initial Connection Page (portrait only, no scroll needed) -->
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true">
+
     <LinearLayout
         android:id="@+id/connectionPage"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
+        android:layout_height="wrap_content"
         android:gravity="center"
+        android:orientation="vertical"
         android:padding="24dp">
 
-        <!-- App Title -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
             android:text="PhoneCam"
-            android:textColor="#FFFFFF"
+            android:textColor="#FFFFFFFF"
             android:textSize="28sp"
-            android:textStyle="bold"
-            android:layout_marginBottom="4dp" />
+            android:textStyle="bold" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="H.264 Stream to PC"
+            android:layout_marginBottom="28dp"
+            android:text="Wi-Fi RTSP camera server"
             android:textColor="#AAFFFFFF"
-            android:textSize="14sp"
-            android:layout_marginBottom="32dp" />
+            android:textSize="14sp" />
 
-        <!-- Server IP Entry -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Server IP Address"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:layout_marginBottom="8dp" />
+            android:layout_marginBottom="8dp"
+            android:text="Receiver URL"
+            android:textColor="#FFFFFFFF"
+            android:textSize="14sp" />
 
-        <EditText
-            android:id="@+id/serverUrl"
+        <TextView
+            android:id="@+id/rtspUrlText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="@string/default_rtsp_url"
-            android:inputType="textUri"
-            android:textColor="#000000"
-            android:textColorHint="#66000000"
-            android:background="@android:drawable/editbox_background"
+            android:layout_marginBottom="12dp"
+            android:background="#FF1F2933"
             android:padding="12dp"
-            android:textSize="16sp"
-            android:layout_marginBottom="16dp" />
-
-        <!-- Resolution Options -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Resolution"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:layout_marginBottom="8dp" />
-
-        <RadioGroup
-            android:id="@+id/resolutionGroup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="16dp">
-
-            <RadioButton
-                android:id="@+id/res1080p"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="1080p"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#FFFFFF" />
-
-            <RadioButton
-                android:id="@+id/res720p"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="720p"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#FFFFFF" />
-
-        </RadioGroup>
-
-        <!-- Frame Rate Options -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Frame Rate"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:layout_marginBottom="8dp" />
-
-        <RadioGroup
-            android:id="@+id/fpsGroup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="16dp">
-
-            <RadioButton
-                android:id="@+id/fps60"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="60 fps"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#FFFFFF" />
-
-            <RadioButton
-                android:id="@+id/fps30"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="30 fps"
-                android:textColor="#FFFFFF"
-                android:buttonTint="#FFFFFF" />
-
-        </RadioGroup>
-
-        <!-- Bitrate Slider -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Bitrate"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:layout_marginBottom="8dp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="4dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="5"
-                android:textColor="#88FFFFFF"
-                android:textSize="12sp" />
-
-            <SeekBar
-                android:id="@+id/bitrateSlider"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:max="25"
-                android:progress="10"
-                android:layout_marginStart="8dp"
-                android:layout_marginEnd="8dp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="30"
-                android:textColor="#88FFFFFF"
-                android:textSize="12sp" />
-        </LinearLayout>
+            android:text="@string/default_rtsp_url"
+            android:textColor="#FF9CDCFE"
+            android:textIsSelectable="true"
+            android:textSize="16sp" />
 
         <TextView
-            android:id="@+id/bitrateLabel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="15 Mbps"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
+            android:layout_marginBottom="8dp"
+            android:text="Pairing Code"
+            android:textColor="#FFFFFFFF"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/pairingCodeText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="20dp"
+            android:background="#FF111827"
+            android:padding="12dp"
+            android:text="000000"
             android:textAlignment="center"
-            android:layout_marginBottom="24dp" />
+            android:textColor="#FFE5E7EB"
+            android:textIsSelectable="true"
+            android:textSize="24sp"
+            android:textStyle="bold" />
 
-        <!-- Connect Button -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="Connection Quality"
+            android:textColor="#FFFFFFFF"
+            android:textSize="14sp" />
+
+        <RadioGroup
+            android:id="@+id/profileGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/profileEfficient"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="#FFFFFFFF"
+                android:text="Efficient"
+                android:textColor="#FFFFFFFF" />
+
+            <RadioButton
+                android:id="@+id/profileBalanced"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="#FFFFFFFF"
+                android:text="Balanced"
+                android:textColor="#FFFFFFFF" />
+
+            <RadioButton
+                android:id="@+id/profileMotion"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:buttonTint="#FFFFFFFF"
+                android:text="Motion"
+                android:textColor="#FFFFFFFF" />
+        </RadioGroup>
+
+        <TextView
+            android:id="@+id/profileSummaryText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:text="Efficient: 960x540 @ 30 fps, 1.2 Mbps"
+            android:textAlignment="center"
+            android:textColor="#AAFFFFFF"
+            android:textSize="13sp" />
+
         <Button
             android:id="@+id/connectBtn"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Connect"
-            android:textSize="16sp"
+            android:layout_marginBottom="16dp"
             android:padding="12dp"
-            android:layout_marginBottom="16dp" />
+            android:text="Start Camera Server"
+            android:textSize="16sp" />
 
-        <!-- Status Text -->
         <TextView
             android:id="@+id/statusText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Ready"
-            android:textColor="#88FFFFFF"
-            android:textSize="14sp"
-            android:textAlignment="center" />
+            android:textAlignment="center"
+            android:textColor="#AAFFFFFF"
+            android:textSize="14sp" />
 
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="24dp"
+            android:layout_marginBottom="16dp"
+            android:background="#33FFFFFF" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="4K60 UDP (experimental)"
+            android:textColor="#FFFFFFFF"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/stream4kCapabilityText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:background="#FF1F2933"
+            android:padding="12dp"
+            android:text="Probing 4K60 capability..."
+            android:textColor="#AAFFFFFF"
+            android:textSize="13sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/stream4kTargetIpEdit"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:background="#FF1F2933"
+                android:hint="Receiver IP"
+                android:inputType="text"
+                android:padding="12dp"
+                android:textColor="#FF9CDCFE"
+                android:textColorHint="#66FFFFFF"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/stream4kTargetPortEdit"
+                android:layout_width="96dp"
+                android:layout_height="wrap_content"
+                android:background="#FF1F2933"
+                android:hint="Port"
+                android:inputType="number"
+                android:padding="12dp"
+                android:text="5004"
+                android:textColor="#FF9CDCFE"
+                android:textColorHint="#66FFFFFF"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/stream4kToggleBtn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:padding="12dp"
+            android:text="Start 4K60 UDP"
+            android:textSize="16sp" />
+
+        <TextView
+            android:id="@+id/stream4kStatsText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="4K UDP idle. Control port: 47822."
+            android:textAlignment="center"
+            android:textColor="#AAFFFFFF"
+            android:textSize="13sp" />
     </LinearLayout>
+    </ScrollView>
 
-    <!-- Camera Preview Page (landscape only) -->
     <FrameLayout
         android:id="@+id/previewPage"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:visibility="gone"
-        android:background="#FF000000">
+        android:background="#FF000000"
+        android:visibility="gone">
 
-        <!-- Camera Preview Surface -->
-        <androidx.camera.view.PreviewView
+        <SurfaceView
             android:id="@+id/cameraPreview"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:layout_gravity="center"
-            android:background="#000000" />
+            android:layout_gravity="center" />
 
-        <!-- Stream info overlay in center -->
-        <LinearLayout
+        <TextView
+            android:id="@+id/previewBadgeText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:orientation="vertical"
-            android:gravity="center"
-            android:background="@android:color/transparent">
+            android:layout_gravity="top|start"
+            android:layout_margin="16dp"
+            android:background="#AA111827"
+            android:paddingStart="12dp"
+            android:paddingTop="7dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="7dp"
+            android:text="PREVIEW STARTING"
+            android:textColor="#FFFBBF24"
+            android:textSize="13sp"
+            android:textStyle="bold" />
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="📹"
-                android:textSize="64sp"
-                android:layout_marginBottom="16dp" />
+        <TextView
+            android:id="@+id/streamHeadlineText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="58dp"
+            android:layout_marginEnd="88dp"
+            android:background="#55000000"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:maxWidth="520dp"
+            android:padding="10dp"
+            android:text="Preview: starting"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/diagnosticsToggleBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_margin="16dp"
+            android:minWidth="64dp"
+            android:text="Info" />
+
+        <LinearLayout
+            android:id="@+id/statusPanel"
+            android:layout_width="340dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="122dp"
+            android:layout_marginEnd="16dp"
+            android:background="#99000000"
+            android:orientation="vertical"
+            android:padding="12dp"
+            android:visibility="gone">
 
             <TextView
                 android:id="@+id/streamStatusText"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Streaming..."
-                android:textColor="#FFFFFF"
-                android:textSize="18sp"
-                android:layout_marginBottom="8dp" />
+                android:text="Streaming"
+                android:textColor="#FFFFFFFF"
+                android:textSize="13sp" />
 
             <TextView
                 android:id="@+id/zoomLabel"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
                 android:text="Zoom: 1.0x"
-                android:textColor="#88FFFFFF"
-                android:textSize="14sp" />
-
+                android:textColor="#CCFFFFFF"
+                android:textSize="12sp" />
         </LinearLayout>
 
-        <!-- Disconnect button in bottom-left - transparent red -->
-        <Button
-            android:id="@+id/disconnectBtn"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_gravity="bottom|start"
-            android:layout_margin="24dp"
-            android:text="Disconnect"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp"
-            android:background="#44FF0000"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
-            android:paddingTop="12dp"
-            android:paddingBottom="12dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp" />
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginStart="16dp"
+            android:layout_marginEnd="16dp"
+            android:layout_marginBottom="64dp"
+            android:gravity="center"
+            android:orientation="horizontal">
 
-        <!-- Hint for zoom -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom|end"
-            android:layout_margin="24dp"
-            android:text="Pinch to zoom"
-            android:textColor="#66FFFFFF"
-            android:textSize="12sp" />
+            <Button
+                android:id="@+id/switchCameraBtn"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="12dp"
+                android:minWidth="0dp"
+                android:maxLines="1"
+                android:textSize="12sp"
+                android:text="Switch" />
 
-        <!-- Fullscreen black overlay for AMOLED dim (shown after 10s connected) -->
+            <Button
+                android:id="@+id/rotateCounterClockwiseBtn"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="12dp"
+                android:minWidth="0dp"
+                android:maxLines="1"
+                android:textSize="12sp"
+                android:text="Rotate Left" />
+
+            <Button
+                android:id="@+id/rotateStreamBtn"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="12dp"
+                android:minWidth="0dp"
+                android:maxLines="1"
+                android:textSize="12sp"
+                android:text="Rotate Right" />
+
+            <Button
+                android:id="@+id/disconnectBtn"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:minWidth="0dp"
+                android:maxLines="1"
+                android:textSize="12sp"
+                android:text="Stop" />
+        </LinearLayout>
+
         <View
             android:id="@+id/blackoutOverlay"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:background="#000000"
-            android:visibility="gone"
+            android:background="#FF000000"
             android:clickable="true"
-            android:focusable="true" />
-
+            android:focusable="true"
+            android:visibility="gone" />
     </FrameLayout>
-
 </FrameLayout>

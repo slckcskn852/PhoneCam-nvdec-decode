@@ -1,0 +1,15 @@
+{
+  "name": "phonecam-windows-receiver",
+  "version-string": "0.1.0",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "swscale"
+      ]
+    }
+  ]
+}
