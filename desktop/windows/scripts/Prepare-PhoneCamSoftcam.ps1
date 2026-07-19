@@ -66,7 +66,7 @@ DEFINE_GUID(CLSID_DShowSoftcam,
   Replace-OrFail $dshowCpp 'CSourceStream(NAME("DirectShow Softcam Stream"), phr, pParent, pPinName)' 'CSourceStream(NAME("PhoneCam Virtual Camera Stream"), phr, pParent, pPinName)'
 
   $msbuild = Get-MSBuild
-  & $msbuild "softcam.sln" /m "/p:Configuration=$Configuration" "/p:Platform=$Platform"
+  & $msbuild "src\softcam\softcam.vcxproj" /m "/p:Configuration=$Configuration" "/p:Platform=$Platform"
   if ($LASTEXITCODE -ne 0) {
     throw "Softcam build failed with exit code $LASTEXITCODE"
   }

@@ -300,6 +300,9 @@ struct Options {
   std::string rtspUrl;
   float fps = 30.0f;
   bool fpsExplicit = false;
+  int width = 1280;
+  int height = 720;
+  bool widthHeightExplicit = false;
   bool preview = true;
   bool softcam = true;
   bool selfTest = false;
@@ -343,7 +346,7 @@ std::string normalizePairCode(const std::string& input) {
 
 void printUsage() {
   std::cout << "Usage: phonecam-receiver\n"
-            << "       phonecam-receiver --rtsp rtsp://PHONE_IP:8554/ [--fps 30] [--frames 120] [--snapshot frame.ppm] [--no-preview] [--no-softcam]\n"
+            << "       phonecam-receiver --rtsp rtsp://PHONE_IP:8554/ [--fps 30] [--width 1280] [--height 720] [--frames 120] [--snapshot frame.ppm] [--no-preview] [--no-softcam]\n"
             << "       phonecam-receiver --auto-discover [--pair-code 123456] [--discover-seconds 5] [--fps 30] [--frames 120] [--snapshot frame.ppm] [--no-preview] [--no-softcam]\n"
             << "       phonecam-receiver --discover [--pair-code 123456] [--discover-seconds 5]\n"
             << "       phonecam-receiver --discovery-self-test [--pair-code 123456]\n"
@@ -408,6 +411,12 @@ Options parseOptions(int argc, char** argv) {
       options.maxFrames = options.selfTestFrames;
     } else if (arg == "--snapshot" && i + 1 < argc) {
       options.snapshotPath = argv[++i];
+    } else if (arg == "--width" && i + 1 < argc) {
+      options.width = std::stoi(argv[++i]);
+      options.widthHeightExplicit = true;
+    } else if (arg == "--height" && i + 1 < argc) {
+      options.height = std::stoi(argv[++i]);
+      options.widthHeightExplicit = true;
     } else if (arg == "--help" || arg == "-h") {
       printUsage();
       std::exit(0);
@@ -491,6 +500,11 @@ void applyDiscoveredDevice(const phonecam::DiscoveryDevice& device, Options& opt
     options.fps = static_cast<float>(device.fps);
     options.fpsFromDiscovery = true;
     std::cout << "Using discovered stream FPS: " << device.fps << "\n";
+  }
+  if (!options.widthHeightExplicit && device.width > 0 && device.height > 0) {
+    options.width = device.width;
+    options.height = device.height;
+    std::cout << "Using discovered stream resolution: " << device.width << "x" << device.height << "\n";
   }
 }
 
@@ -692,8 +706,8 @@ int runReceiver(const Options& options) {
   phonecam::PhoneCamClient client(transportMode, host, controlPort, mediaPort);
   client.setFrameCallback(frameCallback);
 
-  if (!client.start(1280, 720, static_cast<int>(options.fps))) {
-    std::cerr << "Failed to start PhoneCamClient\n";
+  if (!client.start(options.width, options.height, static_cast<int>(options.fps))) {
+    std::cerr << "Failed to start PhoneCamClient with target " << options.width << "x" << options.height << " @ " << static_cast<int>(options.fps) << " fps\n";
     {
       std::lock_guard<std::mutex> lock(decodeMutex);
       avcodec_free_context(&codec);

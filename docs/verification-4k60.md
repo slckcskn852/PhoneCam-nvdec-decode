@@ -120,3 +120,48 @@ This mode forwards control and media over a single multiplexed TCP connection vi
      ```
 4. **Verify Stream:**
    - Confirm the preview displays with minimal latency and zero NACK packets (as TCP is lossless).
+
+---
+
+## 4. Windows PC Hardware Verification Results
+
+### Environment Setup
+- **Sender Device:** Samsung Galaxy Z Fold 5 (Android 14, model/device `RFCW70YEQ1R`).
+- **Receiver PC:** Windows 10/11 x64 PC with Visual Studio 2022 (MSVC 19.44.35228.0) and FFmpeg dependencies from vcpkg.
+- **Virtual Camera:** Branded `PhoneCam Virtual Camera` DirectShow filter compiled from tshino/softcam and registered via UAC.
+
+### Test Execution & Findings
+1. **APK Clean Install:**
+   - Compiled a fresh debug build of the Android app via Gradle on Windows.
+   - Cleared conflicting developer signatures from previous iterations by performing an ADB uninstall (`com.phonecam`), then installed the new build (`app-debug.apk`).
+2. **Direct Connection Test:**
+   - The phone's local network IP was resolved to `192.168.1.220` with the receiver PC running at `192.168.1.125`.
+   - Opened Windows Defender Firewall ports for the receiver using the provided `Install-PhoneCamFirewallRules.ps1` script.
+   - Executed the receiver manually via:
+     ```powershell
+     .\build\windows-receiver\windows\Release\phonecam-receiver.exe --rtsp rtsp://192.168.1.220/
+     ```
+   - Stream rendering was confirmed fully functional on the Windows host with frames successfully sinking into the registered virtual webcam.
+
+### Technical Analysis: FPS & Resolution Mitigation
+- **Observation 1 (720p @ 30 FPS):** The initial receiver log reported a stable, average decode speed of `29.55 fps` (approximately 30 fps) at `1280x720` resolution.
+- **Root Cause (720p Cap):**
+  1. The Windows receiver options parser defaulted `--fps` to `30.0f` if the option was not explicitly provided on the command line.
+  2. The target resolution in the client start function (`client.start(1280, 720, ...)`) was hardcoded to `1280, 720` in the Windows-specific launcher wrapper `desktop/windows/src/main.cpp`, preventing negotiated 4K (3840x2160) streaming requests to the Android encoder.
+- **Remediation & Fixes Applied:**
+  - Patched the Windows receiver launcher to accept custom `--width` and `--height` CLI flags.
+  - Patched the auto-discovery callback (`applyDiscoveredDevice`) to dynamically extract the device's advertised encoding resolution (`width` and `height`) and target framerate (`fps`) from UDP discovery beacons, eliminating hardcoding during LAN auto-pairing.
+- **Observation 2 (4K @ 60 FPS):**
+  - When executing the patched receiver at full 4K60 resolution:
+    ```powershell
+    .\build\windows-receiver\windows\Release\phonecam-receiver.exe --rtsp rtsp://192.168.1.220/ --fps 60 --width 3840 --height 2160
+    ```
+  - The actual decode frame rate dropped significantly, averaging **`18.94 fps`** (693 frames decoded) with laggy rendering.
+- **Performance Bottleneck Analysis:**
+  1. **CPU Decoding Bottleneck:** The current receiver implementation utilizes standard software HEVC decoding on the host CPU. Processing a 4K HEVC stream (8.3 million pixels per frame) is highly CPU-intensive.
+  2. **Software Color Space Conversion:** The decoded YUV420p frames are converted to BGR24 in software using FFmpeg's `sws_scale` function. Performing software scaling/pixel conversion on 4K frames at 60 fps creates a severe CPU pipeline bottleneck, leading to massive frame drops.
+- **Recommendation for Fable 5:**
+  - The software pipeline is verified functional on Windows, but CPU-bound software decoding and scaling cannot sustain 4K60 real-time playback.
+  - To support actual 4K60, the Windows receiver must integrate GPU-based hardware decoding (such as **D3D11VA** or **NVDEC**) and GPU-based color conversion to offload the pipeline from the host CPU.
+
+
