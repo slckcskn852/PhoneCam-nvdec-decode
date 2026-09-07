@@ -3,249 +3,171 @@ package com.phonecam.stream4k
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
-import android.hardware.camera2.params.StreamConfigurationMap
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Build
 import android.util.Log
 import android.util.Size
 
-/**
- * Decides the best 4K60-capable streaming ladder for this device.
- *
- * The decision itself ([chooseLadder]) is pure and unit-testable; all
- * framework access lives behind [DeviceCapabilitiesSource].
- */
+/** A mode belongs to one camera and encoder; never merge capabilities across lenses. */
 data class Ladder(
     val width: Int,
     val height: Int,
     val fps: Int,
     val needsHighSpeedSession: Boolean,
     val bitrateBps: Int,
-    val reason: String
+    val reason: String,
+    val cameraId: String? = null,
+    val encoderName: String? = null
 ) {
     val summary: String
         get() = "${width}x$height @ $fps fps HEVC, ${bitrateBps / 1_000_000f} Mbps" +
             if (needsHighSpeedSession) " (high-speed session)" else ""
+    val combo: Triple<Int, Int, Int> get() = Triple(width, height, fps)
 }
 
-/** Framework-facing capability queries, isolated so tests can stub them. */
 interface DeviceCapabilitiesSource {
-    /** All (width, height, fps) combos the camera can feed an encoder with. */
     fun supportedCombos(): Set<Triple<Int, Int, Int>>
-
-    /** Combos reachable in a normal (non high-speed) capture session. */
     fun normalSessionCombos(): Set<Triple<Int, Int, Int>>
-
-    /** True when at least one HEVC video encoder is present. */
     fun hasHevcEncoder(): Boolean
-
-    /** True when some HEVC encoder claims support for this size/rate. */
     fun hevcEncoderSupports(width: Int, height: Int, fps: Int): Boolean
-
     fun encoderNames(): List<String>
+    fun availableLadders(): List<Ladder> {
+        if (!hasHevcEncoder()) return emptyList()
+        val supported = supportedCombos()
+        val normal = normalSessionCombos()
+        return CapabilityProbe.CANDIDATES.filter {
+            it.combo in supported && (it.combo in normal || it.fps >= 120) &&
+                hevcEncoderSupports(it.width, it.height, it.fps)
+        }.map { it.copy(needsHighSpeedSession = it.combo !in normal) }
+    }
 }
 
 object CapabilityProbe {
-    private val CANDIDATES = listOf(
+    // Default preference is resolution. A receiver can explicitly request any exposed mode.
+    val CANDIDATES = listOf(
         Ladder(3840, 2160, 60, false, 35_000_000, "4K60 HEVC"),
         Ladder(3840, 2160, 30, false, 25_000_000, "4K30 HEVC fallback"),
-        Ladder(1920, 1080, 60, false, 12_000_000, "1080p60 HEVC fallback")
+        Ladder(1920, 1080, 240, true, 45_000_000, "1080p240 HEVC"),
+        Ladder(1920, 1080, 120, true, 28_000_000, "1080p120 HEVC"),
+        Ladder(1920, 1080, 60, false, 12_000_000, "1080p60 HEVC fallback"),
+        Ladder(1920, 1080, 30, false, 8_000_000, "1080p30 HEVC fallback")
     )
 
-    /** Pure decision over camera combos; assumes every combo works in a normal session. */
-    fun chooseLadder(supported: Set<Triple<Int, Int, Int>>, hevcOk: Boolean): Ladder? {
-        return chooseLadder(supported, hevcOk, supported)
-    }
+    fun chooseLadder(supported: Set<Triple<Int, Int, Int>>, hevcOk: Boolean): Ladder? =
+        chooseLadder(supported, hevcOk, supported)
 
-    /**
-     * Pure decision. [supported] is every reachable (w, h, fps) combo,
-     * [normalSessionSupported] the subset usable without a high-speed session.
-     */
     fun chooseLadder(
         supported: Set<Triple<Int, Int, Int>>,
         hevcOk: Boolean,
         normalSessionSupported: Set<Triple<Int, Int, Int>>
     ): Ladder? {
         if (!hevcOk) return null
-        for (candidate in CANDIDATES) {
-            val combo = Triple(candidate.width, candidate.height, candidate.fps)
-            if (combo in supported) {
-                val needsHighSpeed = combo !in normalSessionSupported
-                return candidate.copy(
-                    needsHighSpeedSession = needsHighSpeed,
-                    reason = candidate.reason + if (needsHighSpeed) " via constrained high-speed session" else ""
-                )
-            }
-        }
-        return null
+        return CANDIDATES.firstOrNull {
+            it.combo in supported && (it.combo in normalSessionSupported || it.fps >= 120)
+        }?.let { it.copy(needsHighSpeedSession = it.combo !in normalSessionSupported) }
     }
 }
 
-/**
- * Probes Camera2 + MediaCodec once, caches the result, and renders a
- * human-readable report for the UI.
- */
+/** Public Camera2 metadata only. OEM-only stock-camera modes cannot be assumed available. */
 class AndroidCapabilityProbe(context: Context) : DeviceCapabilitiesSource {
     private val cameraManager = context.getSystemService(CameraManager::class.java)
+    @Volatile private var cached: List<Ladder>? = null
 
-    @Volatile private var cachedLadder: Ladder? = null
-    @Volatile private var cachedReport: String? = null
-    @Volatile private var probed = false
+    fun probe(): Ladder? = availableLadders().firstOrNull()
+    fun invalidate() { synchronized(this) { cached = null } }
 
-    /** Cached probe result; null when no ladder is supported. Safe to call from any thread. */
     @Synchronized
-    fun probe(): Ladder? {
-        if (probed) return cachedLadder
-        probed = true
-        cachedLadder = try {
-            val combos = supportedCombos()
-            val hevcOk = hasHevcEncoder()
-            val chosen = CapabilityProbe.chooseLadder(combos, hevcOk, normalSessionCombos())
-            // Camera and encoder must agree; drop combos no encoder claims.
-            if (chosen != null && !hevcEncoderSupports(chosen.width, chosen.height, chosen.fps)) {
-                Log.w(TAG, "No HEVC encoder confirms ${chosen.summary}; keeping it as best effort")
-            }
-            chosen
-        } catch (e: Exception) {
-            Log.e(TAG, "Capability probe failed", e)
-            null
-        }
-        cachedReport = buildReport(cachedLadder)
-        return cachedLadder
-    }
-
-    fun report(): String {
-        probe()
-        return cachedReport ?: "4K60 UDP probe failed"
-    }
-
-    fun invalidate() {
-        probed = false
-        cachedLadder = null
-        cachedReport = null
-    }
-
-    override fun supportedCombos(): Set<Triple<Int, Int, Int>> {
-        val combos = mutableSetOf<Triple<Int, Int, Int>>()
-        combos.addAll(normalSessionCombos())
-        val map = backCameraConfigurationMap() ?: return combos
+    override fun availableLadders(): List<Ladder> {
+        cached?.let { return it }
+        val result = mutableListOf<Ladder>()
+        val manager = cameraManager ?: return emptyList()
         try {
-            for (size in map.highSpeedVideoSizes.orEmpty()) {
-                for (range in map.getHighSpeedVideoFpsRangesFor(size).orEmpty()) {
-                    if (range.upper >= 60) {
-                        combos.add(Triple(size.width, size.height, range.upper))
-                    }
+            val cameras = manager.cameraIdList.mapNotNull { id ->
+                try { id to manager.getCameraCharacteristics(id) } catch (_: Exception) { null }
+            }.sortedBy { (_, info) ->
+                if (info.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK) 0 else 1
+            }
+            for ((id, info) in cameras) {
+                val map = info.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) ?: continue
+                val sizes = map.getOutputSizes(MediaCodec::class.java)?.toSet().orEmpty()
+                val aeRanges = info.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES).orEmpty()
+                val highSpeed = info.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.contains(
+                    CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO
+                ) == true
+                for (candidate in CapabilityProbe.CANDIDATES) {
+                    val size = Size(candidate.width, candidate.height)
+                    val duration = if (size in sizes) {
+                        try { map.getOutputMinFrameDuration(MediaCodec::class.java, size) } catch (_: Exception) { 0L }
+                    } else 0L
+                    // Unknown duration is not evidence of 60/120/240 FPS. Require a real
+                    // duration and the exact fixed AE range used by the capture request.
+                    val normal = duration > 0 && duration <= 1_000_000_000L / candidate.fps + 1 &&
+                        aeRanges.any { it.lower == candidate.fps && it.upper == candidate.fps }
+                    val constrained = !normal && candidate.fps >= 120 && highSpeed && try {
+                        map.highSpeedVideoSizes?.contains(size) == true &&
+                            map.getHighSpeedVideoFpsRangesFor(size).any {
+                                it.lower == candidate.fps && it.upper == candidate.fps
+                            }
+                    } catch (_: Exception) { false }
+                    if (!normal && !constrained) continue
+                    val encoder = encoderFor(candidate) ?: continue
+                    result += candidate.copy(
+                        needsHighSpeedSession = constrained,
+                        cameraId = id,
+                        encoderName = encoder.name,
+                        reason = "${candidate.reason}; camera $id; ${encoder.name}" +
+                            if (constrained) "; public Camera2 constrained high-speed" else "; normal capture"
+                    )
                 }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "High-speed size query failed", e)
+        } catch (error: Exception) {
+            Log.w(TAG, "Camera capability scan failed", error)
         }
-        return combos
-    }
-
-    override fun normalSessionCombos(): Set<Triple<Int, Int, Int>> {
-        val combos = mutableSetOf<Triple<Int, Int, Int>>()
-        val map = backCameraConfigurationMap() ?: return combos
-        val sizes = try {
-            map.getOutputSizes(android.media.MediaCodec::class.java).orEmpty().toList()
-        } catch (e: Exception) {
-            emptyList()
+        // Preserve back-camera preference when multiple lenses expose the same mode.
+        val sorted = result.distinctBy { it.combo }.sortedBy { mode ->
+            CapabilityProbe.CANDIDATES.indexOfFirst { it.combo == mode.combo }
         }
-        for (size in sizes) {
-            val maxFps = normalSessionMaxFps(map, size) ?: continue
-            if (maxFps >= 30) combos.add(Triple(size.width, size.height, 30))
-            if (maxFps >= 60) combos.add(Triple(size.width, size.height, 60))
-        }
-        return combos
+        cached = sorted
+        return sorted
     }
 
-    private fun normalSessionMaxFps(map: StreamConfigurationMap, size: Size): Int? {
-        return try {
-            val minFrameDurationNs = map.getOutputMinFrameDuration(android.media.MediaCodec::class.java, size)
-            if (minFrameDurationNs <= 0L) {
-                60
-            } else {
-                (1_000_000_000.0 / minFrameDurationNs).toInt()
-            }
-        } catch (e: Exception) {
-            null
-        }
+    override fun supportedCombos() = availableLadders().map { it.combo }.toSet()
+    override fun normalSessionCombos() = availableLadders().filter { !it.needsHighSpeedSession }.map { it.combo }.toSet()
+    override fun hasHevcEncoder() = encoderInfos().isNotEmpty()
+    override fun hevcEncoderSupports(width: Int, height: Int, fps: Int) =
+        encoderFor(Ladder(width, height, fps, false, 1, "probe")) != null
+    override fun encoderNames() = encoderInfos().map { it.name }
+
+    private fun encoderFor(mode: Ladder): MediaCodecInfo? = encoderInfos().firstOrNull { info ->
+        try {
+            val caps = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+            val hardware = if (Build.VERSION.SDK_INT >= 29) info.isHardwareAccelerated
+                else !info.name.startsWith("OMX.google.") && !info.name.startsWith("c2.android.")
+            (mode.fps <= 60 || hardware) &&
+                caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) &&
+                caps.videoCapabilities?.areSizeAndRateSupported(mode.width, mode.height, mode.fps.toDouble()) == true
+        } catch (_: Exception) { false }
     }
 
-    override fun hasHevcEncoder(): Boolean {
-        return hevcEncoderInfos().isNotEmpty()
-    }
-
-    override fun hevcEncoderSupports(width: Int, height: Int, fps: Int): Boolean {
-        return hevcEncoderInfos().any { info ->
-            try {
-                val capabilities = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-                capabilities.videoCapabilities?.areSizeAndRateSupported(width, height, fps.toDouble()) == true
-            } catch (e: Exception) {
-                try {
-                    val capabilities = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)
-                    capabilities.videoCapabilities?.isSizeSupported(width, height) == true
-                } catch (e2: Exception) {
-                    false
-                }
-            }
-        }
-    }
-
-    override fun encoderNames(): List<String> {
-        return hevcEncoderInfos().map { it.name }
-    }
-
-    private fun hevcEncoderInfos() = try {
+    private fun encoderInfos(): List<MediaCodecInfo> = try {
         MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { info ->
             info.isEncoder && info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, true) }
-        }
-    } catch (e: Exception) {
-        emptyList()
-    }
+        }.sortedBy { if (Build.VERSION.SDK_INT >= 29 && it.isHardwareAccelerated) 0 else 1 }
+    } catch (_: Exception) { emptyList() }
 
-    private fun backCameraConfigurationMap(): StreamConfigurationMap? {
-        val manager = cameraManager ?: return null
-        return try {
-            manager.cameraIdList.asSequence()
-                .mapNotNull { cameraId ->
-                    try {
-                        val characteristics = manager.getCameraCharacteristics(cameraId)
-                        if (characteristics.get(CameraCharacteristics.LENS_FACING) ==
-                            CameraCharacteristics.LENS_FACING_BACK
-                        ) {
-                            characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                        } else {
-                            null
-                        }
-                    } catch (e: Exception) {
-                        null
-                    }
-                }
-                .firstOrNull()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun buildReport(ladder: Ladder?): String {
-        val encoders = encoderNames()
-        return if (ladder == null) {
-            listOf(
-                "4K60 UDP: unsupported on this device",
-                "Needs 3840x2160@60/30 or 1920x1080@60 camera output plus an HEVC encoder.",
-                "HEVC encoders: ${if (encoders.isEmpty()) "none" else encoders.joinToString()}"
-            ).joinToString("\n")
+    fun report(): String {
+        val modes = availableLadders()
+        return if (modes.isEmpty()) {
+            "No supported HEVC stream mode exposed by Camera2 and MediaCodec. " +
+                "Stock Samsung camera recording modes may be unavailable to other apps."
         } else {
-            listOf(
-                "4K60 UDP: ${ladder.summary}",
-                ladder.reason,
-                "HEVC encoders: ${if (encoders.isEmpty()) "none" else encoders.joinToString()}"
-            ).joinToString("\n")
+            "Available camera/encoder modes (device verification required):\n" +
+                modes.joinToString("\n") { "${it.summary} • camera ${it.cameraId}" }
         }
     }
 
-    companion object {
-        private const val TAG = "CapabilityProbe"
-    }
+    companion object { private const val TAG = "CapabilityProbe" }
 }

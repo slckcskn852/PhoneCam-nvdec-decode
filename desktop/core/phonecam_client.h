@@ -1,6 +1,7 @@
 #pragma once
 #include "rtp_hevc.h"
 #include "playout_buffer.h"
+#include "latency_controller.h"
 #include <string>
 #include <vector>
 #include <atomic>
@@ -35,8 +36,10 @@ public:
     PhoneCamClient(TransportMode mode, const std::string& host, int controlPort = 47822, int mediaPort = 5004);
     ~PhoneCamClient();
 
-    bool start(int targetWidth = 1280, int targetHeight = 720, int targetFps = 30);
+    bool start(int targetWidth = 1280, int targetHeight = 720, int targetFps = 30, socket_t connectedSocket = INVALID_SOCKET_VAL);
     void stop();
+    void setPlayoutDelayMs(int milliseconds) { manualDelayMs_ = milliseconds; playoutBuffer_.setTargetDelay(milliseconds); }
+    bool isRunning() const { return running_.load(); }
 
     using FrameCallback = std::function<void(const uint8_t* data, size_t len, uint32_t timestamp, bool complete)>;
     void setFrameCallback(FrameCallback cb) { frameCallback_ = cb; }
@@ -47,11 +50,14 @@ public:
         double lossPercent = 0.0;
         uint64_t nackRecoveries = 0;
         double jitterMs = 0.0;
+        int playoutDelayMs = 0;
         double networkFps = 0.0;
         double decodeFps = 0.0;
         double avgFrameAgeMs = 0.0;
     };
     ClientStats getStats();
+    struct NegotiatedFormat { int width = 0, height = 0, fps = 0; };
+    NegotiatedFormat negotiatedFormat();
 
     void reportDecodedFrame(uint32_t rtpTimestamp);
 
@@ -61,6 +67,7 @@ private:
     void keepaliveThreadFunc();
     void playoutThreadFunc();
 
+    bool receiveExact(uint8_t* data, size_t size);
     void sendJson(const std::string& json);
     void handleControlMessage(const std::string& json);
 
@@ -70,6 +77,12 @@ private:
     int mediaPort_;
 
     std::atomic<bool> running_{false};
+    std::mutex sendMutex_;
+    bool winsockStarted_ = false;
+    bool awaitingKeyFrame_ = true;
+    std::atomic<int> manualDelayMs_{-1};
+    LatencyController latency_;
+    std::atomic<int> adaptiveDelayMs_{10};
     socket_t controlSocket_;
     socket_t mediaSocket_;
 
@@ -82,10 +95,12 @@ private:
     PlayoutBuffer playoutBuffer_;
     FrameCallback frameCallback_;
 
-    sockaddr_in controlServerAddr_;
+    sockaddr_in controlServerAddr_{};
+    std::chrono::steady_clock::time_point lastPliTime_{};
 
     // Stats
     std::mutex statsMutex_;
+    NegotiatedFormat negotiatedFormat_;
     uint64_t totalPacketsReceived_ = 0;
     uint64_t totalBytesReceived_ = 0;
     uint64_t packetsLost_ = 0;
@@ -103,6 +118,8 @@ private:
 
     bool hasFirstTimestamp_ = false;
     uint32_t firstRtpTimestamp_ = 0;
+    uint32_t lastRtpTimestamp_ = 0;
+    int64_t elapsedRtpTicks_ = 0;
     std::chrono::steady_clock::time_point firstFrameTime_;
 
     int targetWidth_ = 1280;

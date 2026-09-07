@@ -150,7 +150,7 @@ if [[ -z "$activity" || "$activity" == "No activity found" ]]; then
   exit 2
 fi
 
-"$ADB" -s "$serial" shell am start -n "$activity" >"$OUT_DIR/launch.txt"
+"$ADB" -s "$serial" shell am start -n "$activity" --ez phonecam_advanced true >"$OUT_DIR/launch.txt"
 sleep 3
 
 "$ADB" -s "$serial" exec-out uiautomator dump /dev/tty >"$OUT_DIR/ui.xml" || true

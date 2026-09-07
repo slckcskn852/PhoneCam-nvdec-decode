@@ -15,6 +15,9 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
+#include <cmath>
+#include "video_decoder.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -49,6 +52,11 @@ extern "C" {
 #include "phonecam_client.h"
 #include "control_parser.h"
 #include "discovery.h"
+#include "receiver_connection.h"
+#include "connection_panel.h"
+#include <csignal>
+
+volatile std::sig_atomic_t listenRunning = 1;
 
 namespace {
 
@@ -94,6 +102,7 @@ public:
 #if defined(_WIN32)
 class PreviewSink final : public FrameSink {
 public:
+  ~PreviewSink() override { if (hwnd_) DestroyWindow(hwnd_); }
   bool start(int width, int height, float) override {
     width_ = width;
     height_ = height;
@@ -129,10 +138,14 @@ public:
   }
 
   bool send(const Frame& frame) override {
-    frame_ = frame.bgr;
-    width_ = frame.width;
-    height_ = frame.height;
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    const auto now = std::chrono::steady_clock::now();
+    if (frame_.empty() || now - lastPaint_ >= std::chrono::milliseconds(33)) {
+      frame_ = frame.bgr;
+      width_ = frame.width;
+      height_ = frame.height;
+      InvalidateRect(hwnd_, nullptr, FALSE);
+      lastPaint_ = now;
+    }
     pumpMessages();
     return !closed_;
   }
@@ -171,6 +184,7 @@ private:
         return 0;
       case WM_DESTROY:
         self->closed_ = true;
+        self->hwnd_ = nullptr;
         return 0;
       case WM_PAINT:
         self->paint(hwnd);
@@ -226,6 +240,7 @@ private:
   int height_ = 0;
   bool closed_ = false;
   std::vector<uint8_t> frame_;
+  std::chrono::steady_clock::time_point lastPaint_{};
 };
 #elif defined(__APPLE__)
 using PreviewSink = NullSink;
@@ -237,6 +252,8 @@ using PreviewSink = NullSink;
 class SoftcamSink final : public FrameSink {
 public:
   bool start(int width, int height, float fps) override {
+    if (camera_) scDeleteCamera(camera_);
+    width_ = width; height_ = height;
     camera_ = scCreateCamera(width, height, fps);
     if (!camera_) {
       std::cerr << "Softcam failed to create PhoneCam Virtual Camera. Is softcam.dll registered?\n";
@@ -247,7 +264,8 @@ public:
   }
 
   bool send(const Frame& frame) override {
-    if (!camera_) return false;
+    if (!camera_ || frame.width != width_ || frame.height != height_ ||
+        frame.bgr.size() != static_cast<size_t>(width_) * height_ * 3) return false;
     scSendFrame(camera_, frame.bgr.data());
     return true;
   }
@@ -261,6 +279,7 @@ public:
 
 private:
   scCamera camera_ = nullptr;
+  int width_ = 0, height_ = 0;
 };
 #endif
 
@@ -271,11 +290,10 @@ public:
   }
 
   bool start(int width, int height, float fps) override {
-    bool any = false;
     for (auto& sink : sinks_) {
-      any = sink->start(width, height, fps) || any;
+      if (!sink->start(width, height, fps)) return false;
     }
-    return any;
+    return !sinks_.empty();
   }
 
   bool send(const Frame& frame) override {
@@ -305,6 +323,14 @@ struct Options {
   bool widthHeightExplicit = false;
   bool preview = true;
   bool softcam = true;
+  bool hardwareDecode = true;
+  bool inputFile = false;
+  bool listen = false;
+  int listenPort = phonecam::kReceiverPort;
+  socket_t connectedSocket = INVALID_SOCKET_VAL;
+  bool automaticFormat = false;
+  int idleTimeoutSeconds = 15;
+  int jitterMs = -1;
   bool selfTest = false;
   bool discover = false;
   bool autoDiscover = false;
@@ -325,11 +351,12 @@ struct Options {
 
 struct RtspEndpoint {
   std::string host = "unknown";
-  std::string port = "554";
+  std::string port;
   std::string path = "/";
 };
 
 int runReceiver(const Options& options);
+int runRtspReceiver(const Options& options);
 
 std::string normalizePairCode(const std::string& input) {
   std::string digits;
@@ -353,25 +380,40 @@ void printUsage() {
             << "       phonecam-receiver --pair-code-mismatch-self-test\n"
             << "       phonecam-receiver --auto-discovery-selection-self-test\n"
             << "       phonecam-receiver --auto-discover-self-test rtsp://127.0.0.1:8554/path [--pair-code 123456] [--frames 60] [--snapshot frame.ppm] [--no-preview] [--no-softcam]\n"
+            << "       phonecam-receiver --rtsp udp://PHONE_IP:5004 --width 1920 --height 1080 --fps 240 [--jitter-ms 20] [--software-decode]\n"
+            << "       phonecam-receiver --input FILE [--frames 60] [--no-preview] [--no-softcam]\n"
+            << "       phonecam-receiver --dependency-info | --release-check\n"
             << "       phonecam-receiver --self-test [--fps 30] [--frames 120] [--snapshot frame.ppm] [--no-preview] [--no-softcam]\n\n"
-            << "With no arguments, the receiver waits up to 15 seconds for a PhoneCam LAN discovery beacon.\n";
+            << "Native transport: --rtsp udp://PHONE_IP:5004/ or tcp://PHONE_IP:47822/; --software-decode disables D3D11VA; --idle-timeout SECONDS (default 15).\n"
+            << "With no arguments (or --listen), open the connection window and wait for a phone. Use --auto-discover for legacy sender discovery.\n";
 }
 
 Options parseOptions(int argc, char** argv) {
   Options options;
   const bool noArguments = argc == 1;
   if (noArguments) {
-    options.autoDiscover = true;
-    options.discover = true;
-    options.discoverSeconds = 15;
+    options.listen = true;
   }
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--rtsp" && i + 1 < argc) {
       options.rtspUrl = argv[++i];
+    } else if (arg == "--listen") {
+      options.listen = true;
+    } else if (arg == "--listen-port" && i + 1 < argc) {
+      options.listen = true; options.listenPort = std::stoi(argv[++i]);
+    } else if (arg == "--input" && i + 1 < argc) {
+      options.rtspUrl = argv[++i];
+      options.inputFile = true;
     } else if (arg == "--fps" && i + 1 < argc) {
       options.fps = std::stof(argv[++i]);
       options.fpsExplicit = true;
+    } else if (arg == "--jitter-ms" && i + 1 < argc) {
+      options.jitterMs = std::stoi(argv[++i]);
+    } else if (arg == "--software-decode") {
+      options.hardwareDecode = false;
+    } else if (arg == "--idle-timeout" && i + 1 < argc) {
+      options.idleTimeoutSeconds = std::stoi(argv[++i]);
     } else if (arg == "--no-preview") {
       options.preview = false;
     } else if (arg == "--no-softcam") {
@@ -426,12 +468,18 @@ Options parseOptions(int argc, char** argv) {
   }
   if (!options.selfTest && !options.discoverySelfTest && !options.pairCodeMismatchSelfTest &&
       !options.autoDiscoverySelectionSelfTest && !options.autoDiscoverySelfTest &&
-      !options.discover && !options.autoDiscover && options.rtspUrl.empty()) {
+      !options.listen && !options.discover && !options.autoDiscover && options.rtspUrl.empty()) {
     throw std::runtime_error("Missing --rtsp URL.");
   }
   if (options.autoDiscoverySelfTest && options.autoDiscoverySelfTestUrl.rfind("rtsp://", 0) != 0) {
     throw std::runtime_error("--auto-discover-self-test requires an RTSP URL.");
   }
+  if (!std::isfinite(options.fps) || options.fps < 1 || options.fps > 240 ||
+      options.width < 4 || options.width > 3840 || options.width % 4 != 0 ||
+      options.height < 2 || options.height > 2160 || options.height % 2 != 0 ||
+      options.selfTestFrames <= 0 || options.jitterMs < -1 || options.jitterMs > 1000 || options.idleTimeoutSeconds < 1 || options.idleTimeoutSeconds > 300)
+    throw std::runtime_error("Invalid dimensions, FPS (1..240), frame count or idle timeout (1..300).");
+  if (options.listenPort < 1 || options.listenPort > 65535) throw std::runtime_error("Invalid listen port");
   options.pairCode = normalizePairCode(options.pairCode);
   if (!options.pairCode.empty() && options.pairCode.size() != 6) {
     throw std::runtime_error("--pair-code must contain six digits.");
@@ -496,12 +544,12 @@ void applyDiscoveredDevice(const phonecam::DiscoveryDevice& device, Options& opt
   if (options.rtspUrl.empty()) {
     options.rtspUrl = device.url;
   }
-  if (!options.fpsExplicit && device.fps > 0) {
+  if (!options.fpsExplicit && device.fps > 0 && device.fps <= 240) {
     options.fps = static_cast<float>(device.fps);
     options.fpsFromDiscovery = true;
     std::cout << "Using discovered stream FPS: " << device.fps << "\n";
   }
-  if (!options.widthHeightExplicit && device.width > 0 && device.height > 0) {
+  if (!options.widthHeightExplicit && device.width > 0 && device.width <= 3840 && device.width % 4 == 0 && device.height > 0 && device.height <= 2160 && device.height % 2 == 0) {
     options.width = device.width;
     options.height = device.height;
     std::cout << "Using discovered stream resolution: " << device.width << "x" << device.height << "\n";
@@ -579,107 +627,81 @@ void writeSnapshotPpm(const Frame& frame, const std::string& path) {
   }
 
   out << "P6\n" << frame.width << " " << frame.height << "\n255\n";
-  for (size_t offset = 0; offset + 2 < frame.bgr.size(); offset += 3) {
-    const char rgb[3] = {
-      static_cast<char>(frame.bgr[offset + 2]),
-      static_cast<char>(frame.bgr[offset + 1]),
-      static_cast<char>(frame.bgr[offset + 0])
-    };
-    out.write(rgb, sizeof(rgb));
+  std::vector<uint8_t> row(static_cast<size_t>(frame.width) * 3);
+  for (int y = 0; y < frame.height; ++y) {
+    const auto* source = frame.bgr.data() + y * row.size();
+    for (size_t x = 0; x < row.size(); x += 3) {
+      row[x] = source[x + 2]; row[x + 1] = source[x + 1]; row[x + 2] = source[x];
+    }
+    out.write(reinterpret_cast<const char*>(row.data()), static_cast<std::streamsize>(row.size()));
   }
   if (!out) {
     throw std::runtime_error("Failed to write snapshot file: " + path);
   }
 }
 
-int runReceiver(const Options& options) {
+int runReceiver(const Options& inputOptions) {
+  Options options = inputOptions;
+  struct AcceptedSocket {
+    socket_t value;
+    ~AcceptedSocket() {
+      if (value == INVALID_SOCKET_VAL) return;
+#if defined(_WIN32)
+      closesocket(value);
+#else
+      close(value);
+#endif
+    }
+  } accepted{options.connectedSocket};
+  if (options.inputFile || options.rtspUrl.rfind("rtsp://", 0) == 0 || options.rtspUrl.rfind("rtsps://", 0) == 0)
+    return runRtspReceiver(options);
+  if (options.rtspUrl.rfind("udp://", 0) != 0 && options.rtspUrl.rfind("tcp://", 0) != 0)
+    throw std::runtime_error("Use udp://, tcp://, rtsp:// or --input FILE.");
+  if (!options.widthHeightExplicit && !options.fpsFromDiscovery) { options.width = 3840; options.height = 2160; }
+  if (!options.fpsExplicit && !options.fpsFromDiscovery) options.fps = 60;
   const auto endpoint = parseRtspEndpoint(options.rtspUrl);
   const std::string targetLabel = endpointLabel(endpoint);
 
-  const AVCodec* decoder = avcodec_find_decoder(AV_CODEC_ID_HEVC);
-  if (!decoder) {
-    std::cerr << "HEVC decoder not found\n";
-    return 2;
-  }
-  AVCodecContext* codec = avcodec_alloc_context3(decoder);
-  if (!codec) {
-    std::cerr << "Failed to allocate codec context\n";
-    return 2;
-  }
-  codec->flags |= AV_CODEC_FLAG_LOW_DELAY;
-  int rc = avcodec_open2(codec, decoder, nullptr);
-  if (rc < 0) {
-    std::cerr << "Failed to open decoder: " << avError(rc) << "\n";
-    avcodec_free_context(&codec);
-    return 2;
-  }
-
-  struct DecodedFrame {
-    int width = 0;
-    int height = 0;
-    std::vector<uint8_t> bgr;
-  };
-
+  VideoDecoder decoder(options.hardwareDecode);
+  std::cout << "HEVC decode: " << (decoder.hardwareEnabled() ? "D3D11VA" : "software") << "\n";
   std::mutex queueMutex;
-  std::vector<DecodedFrame> frameQueue;
+  std::condition_variable frameReady;
+  Frame pendingFrame, producerFrame;
+  bool pending = false;
   std::atomic<bool> allSinksClosed{false};
   std::atomic<int64_t> decodeErrors{0};
+  std::atomic<int64_t> framesReplaced{0};
+  std::atomic<int64_t> resolutionChanges{0};
+  int outputWidth = options.automaticFormat ? 0 : options.width;
+  int outputHeight = options.automaticFormat ? 0 : options.height;
 
-  SwsContext* sws = nullptr;
-  std::mutex decodeMutex;
-
-  auto frameCallback = [&](const uint8_t* data, size_t len, uint32_t timestamp, bool) {
-    if (allSinksClosed) return;
-
-    AVPacket* packet = av_packet_alloc();
-    packet->data = const_cast<uint8_t*>(data);
-    packet->size = static_cast<int>(len);
-    packet->pts = timestamp;
-
-    {
-      std::lock_guard<std::mutex> lock(decodeMutex);
-      int rcSend = avcodec_send_packet(codec, packet);
-      av_packet_free(&packet);
-      if (rcSend < 0) {
-        ++decodeErrors;
-        return;
-      }
-
-      AVFrame* decoded = av_frame_alloc();
-      while (avcodec_receive_frame(codec, decoded) == 0) {
-        if (!sws || decoded->width != codec->width || decoded->height != codec->height) {
-          sws_freeContext(sws);
-          sws = sws_getContext(
-            decoded->width,
-            decoded->height,
-            static_cast<AVPixelFormat>(decoded->format),
-            decoded->width,
-            decoded->height,
-            AV_PIX_FMT_BGR24,
-            SWS_FAST_BILINEAR,
-            nullptr, nullptr, nullptr
-          );
+  auto frameCallback = [&](const uint8_t* data, size_t len, uint32_t timestamp, bool complete) {
+    if (allSinksClosed || !complete) return;
+    try {
+      decodeErrors += decoder.decode(data, len, timestamp, [&](AVFrame* decoded) {
+        if (outputWidth == 0) { outputWidth = decoded->width; outputHeight = decoded->height; }
+        if (decoded->width != outputWidth || decoded->height != outputHeight) ++resolutionChanges;
+        // Keep the virtual camera format fixed across sender ABR resolution changes.
+        producerFrame.width = outputWidth;
+        producerFrame.height = outputHeight;
+        producerFrame.bgr.resize(static_cast<size_t>(outputWidth) * outputHeight * 3);
+        if (!decoder.convert(decoded, outputWidth, outputHeight, producerFrame.bgr.data())) {
+          ++decodeErrors;
+          return;
         }
-
-        if (sws) {
-          DecodedFrame df;
-          df.width = decoded->width;
-          df.height = decoded->height;
-          df.bgr.resize(static_cast<size_t>(df.width) * static_cast<size_t>(df.height) * 3);
-          uint8_t* dstData[4] = { df.bgr.data(), nullptr, nullptr, nullptr };
-          int dstLinesize[4] = { df.width * 3, 0, 0, 0 };
-          sws_scale(sws, decoded->data, decoded->linesize, 0, decoded->height, dstData, dstLinesize);
-
-          {
-            std::lock_guard<std::mutex> qLock(queueMutex);
-            if (frameQueue.size() > 5) {
-              frameQueue.erase(frameQueue.begin());
-            }
-            frameQueue.push_back(std::move(df));
-          }
+        {
+          std::lock_guard<std::mutex> lock(queueMutex);
+          if (pending) ++framesReplaced;
+          std::swap(pendingFrame, producerFrame);
+          pending = true;
         }
-      }
-      av_frame_free(&decoded);
+        frameReady.notify_one();
+      });
+    } catch (const std::exception& error) {
+      std::cerr << "Decoder stopped: " << error.what() << "\n";
+      ++decodeErrors;
+      allSinksClosed = true;
+      frameReady.notify_one();
     }
   };
 
@@ -705,13 +727,13 @@ int runReceiver(const Options& options) {
 
   phonecam::PhoneCamClient client(transportMode, host, controlPort, mediaPort);
   client.setFrameCallback(frameCallback);
+  if (options.jitterMs >= 0) client.setPlayoutDelayMs(options.jitterMs);
 
-  if (!client.start(options.width, options.height, static_cast<int>(options.fps))) {
+  accepted.value = INVALID_SOCKET_VAL; // start takes ownership, including failure paths.
+  if (!client.start(options.automaticFormat ? 0 : options.width, options.automaticFormat ? 0 : options.height,
+                    options.automaticFormat ? 0 : static_cast<int>(options.fps), options.connectedSocket)) {
     std::cerr << "Failed to start PhoneCamClient with target " << options.width << "x" << options.height << " @ " << static_cast<int>(options.fps) << " fps\n";
-    {
-      std::lock_guard<std::mutex> lock(decodeMutex);
-      avcodec_free_context(&codec);
-    }
+    client.stop();
     return 2;
   }
 
@@ -722,6 +744,8 @@ int runReceiver(const Options& options) {
   Frame snapshotFrame;
   auto started = std::chrono::steady_clock::now();
   auto lastLog = started;
+  auto lastFrameTime = started;
+  Frame frame;
 
   auto buildStatus = [&](const std::string& state, int width, int height) {
     const auto now = std::chrono::steady_clock::now();
@@ -739,36 +763,41 @@ int runReceiver(const Options& options) {
     return status;
   };
 
-  while (!allSinksClosed) {
-    DecodedFrame df;
+  bool userClosed = false;
+  while (!allSinksClosed && (!options.listen || listenRunning)) {
     bool hasFrame = false;
     {
-      std::lock_guard<std::mutex> qLock(queueMutex);
-      if (!frameQueue.empty()) {
-        df = std::move(frameQueue.front());
-        frameQueue.erase(frameQueue.begin());
+      std::unique_lock<std::mutex> lock(queueMutex);
+      frameReady.wait_for(lock, std::chrono::milliseconds(100), [&] { return pending || allSinksClosed.load(); });
+      if (pending) {
+        std::swap(frame, pendingFrame);
+        pending = false;
         hasFrame = true;
       }
     }
-
+    if (!client.isRunning() || std::chrono::steady_clock::now() - lastFrameTime > std::chrono::seconds(options.idleTimeoutSeconds)) {
+      std::cerr << "Stream disconnected or timed out.\n";
+      break;
+    }
     if (hasFrame) {
-      Frame frame;
-      frame.width = df.width;
-      frame.height = df.height;
-      frame.bgr = std::move(df.bgr);
-
+      lastFrameTime = std::chrono::steady_clock::now();
       if (!sinkStarted) {
-        sinkStarted = sink.start(frame.width, frame.height, options.fps);
+        const auto negotiated = client.negotiatedFormat();
+        std::cout << "Negotiated source: " << negotiated.width << "x" << negotiated.height << " @ " << negotiated.fps << " fps\n";
+        const float fps = negotiated.fps > 0 ? static_cast<float>(negotiated.fps) : options.fps;
+        sinkStarted = sink.start(frame.width, frame.height, fps);
+        if (!sinkStarted) break;
         sink.updateStatus(buildStatus("connected", frame.width, frame.height));
       }
 
       if (!sink.send(frame)) {
+        userClosed = true;
         std::cout << "All sinks closed.\n";
         allSinksClosed = true;
         break;
       }
 
-      if (!options.snapshotPath.empty()) {
+      if (!options.snapshotPath.empty() && snapshotFrame.bgr.empty()) {
         snapshotFrame = frame;
       }
 
@@ -779,7 +808,7 @@ int runReceiver(const Options& options) {
       if (now - lastLog > std::chrono::seconds(2)) {
         auto clientStats = client.getStats();
         std::cout << "Decoded " << frames << " frames, avg " << (frames / std::chrono::duration<double>(now - started).count())
-                  << " fps, loss " << clientStats.lossPercent << "%, jitter " << clientStats.jitterMs << " ms\n";
+                  << " fps, loss " << clientStats.lossPercent << "%, jitter " << clientStats.jitterMs << " ms, playout " << clientStats.playoutDelayMs << " ms\n";
         sink.updateStatus(buildStatus("connected", frame.width, frame.height));
         lastLog = now;
       }
@@ -787,18 +816,12 @@ int runReceiver(const Options& options) {
       if (options.maxFrames > 0 && frames >= options.maxFrames) {
         break;
       }
-    } else {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
   }
 
   client.stop();
-
-  {
-    std::lock_guard<std::mutex> lock(decodeMutex);
-    if (sws) sws_freeContext(sws);
-    avcodec_free_context(&codec);
-  }
+  std::cout << "Frames replaced by newer output: " << framesReplaced << "\n";
+  std::cout << "Frames with different source resolution: " << resolutionChanges << "\n";
 
   const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
   if (elapsed > 0.0) {
@@ -807,7 +830,7 @@ int runReceiver(const Options& options) {
   }
 
   const bool hasEnoughFrames = options.maxFrames <= 0 || frames >= options.maxFrames;
-  int exitCode = frames > 0 && hasEnoughFrames ? 0 : 2;
+  int exitCode = frames > 0 && hasEnoughFrames && decodeErrors == 0 ? 0 : 2;
 
   if (!options.snapshotPath.empty() && frames > 0) {
     try {
@@ -826,12 +849,103 @@ int runReceiver(const Options& options) {
               << "/" << options.maxFrames << " frames.\n";
   }
 
-  return exitCode;
+  return userClosed && options.listen ? 3 : exitCode;
+}
+
+// Standard RTSP remains a real demux/decode path; it is not PhoneCam UDP.
+int runRtspReceiver(const Options& options) {
+  struct Input {
+    AVFormatContext* format = avformat_alloc_context();
+    AVPacket* packet = av_packet_alloc();
+    std::chrono::steady_clock::time_point deadline;
+    ~Input() { av_packet_free(&packet); avformat_close_input(&format); }
+  } input;
+  if (!input.format || !input.packet) throw std::bad_alloc();
+  auto refreshDeadline = [&] {
+    input.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(options.idleTimeoutSeconds);
+  };
+  refreshDeadline();
+  input.format->interrupt_callback = {
+    [](void* opaque) -> int {
+      return std::chrono::steady_clock::now() > static_cast<Input*>(opaque)->deadline;
+    }, &input
+  };
+  AVDictionary* settings = nullptr;
+  av_dict_set(&settings, "rtsp_transport", "tcp", 0);
+  av_dict_set(&settings, "rw_timeout", "5000000", 0);
+  int rc = avformat_open_input(&input.format, options.rtspUrl.c_str(), nullptr, &settings);
+  av_dict_free(&settings);
+  if (rc < 0) throw std::runtime_error("Cannot open stream: " + avError(rc));
+  rc = avformat_find_stream_info(input.format, nullptr);
+  if (rc < 0) throw std::runtime_error("Cannot read video format: " + avError(rc));
+  int video = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+  if (video < 0) throw std::runtime_error("No video stream");
+  AVStream* stream = input.format->streams[video];
+  Options output = options;
+  if (!options.widthHeightExplicit && !options.fpsFromDiscovery) {
+    output.width = stream->codecpar->width;
+    output.height = stream->codecpar->height;
+  }
+  if (!options.fpsExplicit && !options.fpsFromDiscovery) {
+    AVRational rate = av_guess_frame_rate(input.format, stream, nullptr);
+    if (rate.num > 0 && rate.den > 0) output.fps = static_cast<float>(av_q2d(rate));
+  }
+  if (output.width < 4 || output.width > 3840 || output.width % 4 != 0 ||
+      output.height < 2 || output.height > 2160 || output.height % 2 != 0 ||
+      !std::isfinite(output.fps) || output.fps < 1 || output.fps > 240)
+    throw std::runtime_error("Unsupported output size/rate; use --width/--height/--fps.");
+  VideoDecoder decoder(options.hardwareDecode, stream->codecpar->codec_id, stream->codecpar);
+  CompositeSink sink;
+  configureSinks(sink, output);
+  if (!sink.start(output.width, output.height, output.fps)) return 2;
+  Frame frame, snapshot;
+  frame.width = output.width; frame.height = output.height;
+  frame.bgr.resize(static_cast<size_t>(frame.width) * frame.height * 3);
+  int64_t frames = 0, decodeErrors = 0;
+  uint64_t bytes = 0;
+  bool closed = false;
+  const auto started = std::chrono::steady_clock::now();
+  auto lastLog = started;
+  auto deliver = [&](AVFrame* decoded) {
+        if (closed || (options.maxFrames > 0 && frames >= options.maxFrames)) return;
+        if (!decoder.convert(decoded, frame.width, frame.height, frame.bgr.data())) { ++decodeErrors; return; }
+        if (!sink.send(frame)) { closed = true; return; }
+        ++frames;
+        if (!options.snapshotPath.empty() && snapshot.bgr.empty()) snapshot = frame;
+      };
+  while (!closed && (options.maxFrames <= 0 || frames < options.maxFrames)) {
+    refreshDeadline();
+    rc = av_read_frame(input.format, input.packet);
+    if (rc < 0) break;
+    if (input.packet->stream_index == video) {
+      bytes += input.packet->size;
+      decodeErrors += decoder.decode(input.packet->data, input.packet->size, 0, deliver);
+    }
+    av_packet_unref(input.packet);
+    auto now = std::chrono::steady_clock::now();
+    if (now - lastLog >= std::chrono::seconds(2)) {
+      const double elapsed = std::chrono::duration<double>(now - started).count();
+      ReceiverStatus status;
+      status.state = "connected"; status.width = frame.width; status.height = frame.height;
+      status.frames = frames; status.avgFps = frames / elapsed;
+      status.incomingMbps = bytes * 8.0 / elapsed / 1000000.0;
+      status.decodeErrors = decodeErrors;
+      sink.updateStatus(status);
+      lastLog = now;
+    }
+  }
+  if (rc == AVERROR_EOF) decodeErrors += decoder.flush(deliver);
+  if (!options.snapshotPath.empty() && !snapshot.bgr.empty()) writeSnapshotPpm(snapshot, options.snapshotPath);
+  const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+  std::cout << "Receiver summary: " << frames << " frames, avg " << frames / elapsed
+            << " fps, incoming " << bytes * 8.0 / elapsed / 1000000.0
+            << " Mbps, decode errors " << decodeErrors << "\n";
+  return frames > 0 && decodeErrors == 0 && (options.maxFrames <= 0 || frames >= options.maxFrames) ? 0 : 2;
 }
 
 int runSelfTest(const Options& options) {
-  constexpr int width = 320;
-  constexpr int height = 240;
+  const int width = options.widthHeightExplicit ? options.width : 320;
+  const int height = options.widthHeightExplicit ? options.height : 240;
   CompositeSink sink;
   configureSinks(sink, options);
 
@@ -841,8 +955,9 @@ int runSelfTest(const Options& options) {
 
   const auto frameDelay = std::chrono::duration<double>(1.0 / options.fps);
   Frame snapshotFrame;
+  auto nextFrame = std::chrono::steady_clock::now();
+  Frame frame;
   for (int frameIndex = 0; frameIndex < options.selfTestFrames; ++frameIndex) {
-    Frame frame;
     frame.width = width;
     frame.height = height;
     frame.bgr.resize(width * height * 3);
@@ -862,7 +977,8 @@ int runSelfTest(const Options& options) {
     if (!options.snapshotPath.empty()) {
       snapshotFrame = frame;
     }
-    std::this_thread::sleep_for(frameDelay);
+    nextFrame += std::chrono::duration_cast<std::chrono::steady_clock::duration>(frameDelay);
+    std::this_thread::sleep_until(nextFrame);
   }
 
   if (!options.snapshotPath.empty()) {
@@ -881,9 +997,61 @@ int runSelfTest(const Options& options) {
 
 } // namespace
 
+
+int runListenReceiver(Options options) {
+  std::signal(SIGINT, [](int) { listenRunning = 0; });
+  phonecam::ReceiverListener listener(options.listenPort);
+  const auto name = phonecam::computerName();
+  phonecam::ReceiverAdvertisement advertisement(name, listener.port());
+  ConnectionPanel panel(name, phonecam::localIPv4Addresses(), listener.port());
+  options.automaticFormat = !options.widthHeightExplicit && !options.fpsExplicit;
+  while (listenRunning && panel.pump()) {
+    std::string peer;
+    auto socket = listener.acceptPhone(peer, std::chrono::milliseconds(50));
+    if (socket == INVALID_SOCKET_VAL) continue;
+    options.connectedSocket = socket;
+    options.rtspUrl = "tcp://" + peer + ":" + std::to_string(listener.port());
+    panel.status("Phone connected. Starting camera…");
+    panel.show(false);
+    const int result = runReceiver(options);
+    if (result == 3) return 0;
+    if (options.maxFrames > 0) return result;
+    panel.show(true);
+    panel.status("Phone disconnected. Ready to reconnect — keep the phone app open.");
+  }
+  return 0;
+}
+
+int printDependencyInfo(bool checkRelease) {
+  struct Library { const char* name; const char* license; const char* configuration; };
+  const Library libraries[] = {
+    {"avcodec", avcodec_license(), avcodec_configuration()},
+    {"avformat", avformat_license(), avformat_configuration()},
+    {"avutil", avutil_license(), avutil_configuration()},
+    {"swscale", swscale_license(), swscale_configuration()}
+  };
+  bool allowed = true;
+  for (const auto& library : libraries) {
+    std::cout << library.name << ": " << library.license << "\n" << library.configuration << "\n";
+    const std::string license = library.license, configuration = library.configuration;
+    allowed = allowed && license.rfind("LGPL", 0) == 0 &&
+        configuration.find("--enable-gpl") == std::string::npos &&
+        configuration.find("--enable-nonfree") == std::string::npos &&
+        configuration.find("--enable-shared") != std::string::npos;
+  }
+  if (checkRelease && !allowed) {
+    std::cerr << "Release blocked: use shared LGPL FFmpeg libraries without GPL/nonfree components.\n";
+    return 2;
+  }
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && (std::string(argv[1]) == "--dependency-info" || std::string(argv[1]) == "--release-check"))
+    return printDependencyInfo(std::string(argv[1]) == "--release-check");
   try {
     Options options = parseOptions(argc, argv);
+    if (options.listen) return runListenReceiver(options);
     if (options.selfTest) {
       return runSelfTest(options);
     }

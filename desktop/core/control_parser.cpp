@@ -3,10 +3,23 @@
 #include <stdexcept>
 #include <cmath>
 #include <functional>
+#include <limits>
 
 namespace phonecam {
 
 JsonValue JsonParser::parse(const std::string& json) {
+    if (json.size() > 65535) return {};
+    int depth = 0; bool quoted = false, escaped = false;
+    for (char c : json) {
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') quoted = false;
+        } else if (c == '"') quoted = true;
+        else if (c == '{' || c == '[') { if (++depth > 16) return {}; }
+        else if (c == '}' || c == ']') { if (--depth < 0) return {}; }
+    }
+    if (quoted || depth != 0) return {};
     size_t index = 0;
     auto skipWhitespace = [](const std::string& js, size_t& idx) {
         while (idx < js.size() && (js[idx] == ' ' || js[idx] == '\t' || js[idx] == '\n' || js[idx] == '\r')) {
@@ -154,20 +167,24 @@ ControlMessage parseControlMessage(const std::string& jsonStr) {
     msg.status = root["status"].strVal;
     msg.deviceName = root["device_name"].strVal;
     msg.transport = root["transport"].strVal;
-    msg.streamPort = static_cast<int>(root["stream_port"].numVal);
+    auto integer = [](const JsonValue& value) {
+        return value.isNumber() && std::isfinite(value.numVal) && value.numVal >= 0 &&
+            value.numVal <= std::numeric_limits<int>::max() ? static_cast<int>(value.numVal) : 0;
+    };
+    msg.streamPort = integer(root["stream_port"]);
     
     const auto& ladder = root["selected_ladder"];
     if (ladder.isObject()) {
-        msg.width = static_cast<int>(ladder["width"].numVal);
-        msg.height = static_cast<int>(ladder["height"].numVal);
-        msg.fps = static_cast<int>(ladder["fps"].numVal);
-        msg.bitrate = static_cast<int>(ladder["bitrate"].numVal);
+        msg.width = integer(ladder["width"]);
+        msg.height = integer(ladder["height"]);
+        msg.fps = integer(ladder["fps"]);
+        msg.bitrate = integer(ladder["bitrate"]);
     }
     
     const auto& seqsVal = root["seqs"];
     if (seqsVal.isArray()) {
         for (const auto& item : seqsVal.arrVal) {
-            if (item.isNumber()) {
+            if (item.isNumber() && std::isfinite(item.numVal) && item.numVal >= 0 && item.numVal <= 65535 && msg.seqs.size() < 128) {
                 msg.seqs.push_back(static_cast<uint16_t>(item.numVal));
             }
         }

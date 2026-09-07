@@ -17,7 +17,10 @@ target_link_libraries(phonecam-receiver PRIVATE
   "-framework CoreVideo"
   "-framework AVFoundation"
   "-framework QuartzCore"
+  "-framework CoreImage"
 )
+
+target_compile_options(phonecam-receiver PRIVATE -fobjc-arc)
 
 # CoreMediaIO Camera Extension skeleton target
 add_executable(phonecam-camera-extension

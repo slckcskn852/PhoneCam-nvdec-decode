@@ -1,0 +1,388 @@
+diff --git a/src/softcamcore/DShowSoftcam.cpp b/src/softcamcore/DShowSoftcam.cpp
+index 024d978..2dedadc 100644
+--- a/src/softcamcore/DShowSoftcam.cpp
++++ b/src/softcamcore/DShowSoftcam.cpp
+@@ -7,6 +7,7 @@
+ #include <cmath>
+ #include <chrono>
+ #include <ctime>
++#include <cstdlib>
+ 
+ 
+ namespace {
+@@ -109,14 +110,14 @@ void fillMediaType(AM_MEDIA_TYPE* amt, int width, int height, float framerate)
+     {
+         framerate = 60.0f;
+     }
+-    const float bit_rate = (float)width * (float)height * 24 * framerate;
+-    const float period = 10 * 1000 * 1000 / framerate;
++    const double bit_rate = static_cast<double>(width) * height * 24 * framerate;
++    const double period = 10000000.0 / framerate;
+ 
+     VIDEOINFOHEADER* pFormat = (VIDEOINFOHEADER*)pbFormat;
+     std::memset(pFormat, 0, sizeof(*pFormat));
+-    pFormat->dwBitRate = (uint32_t)(std::min)(bit_rate, (float)INT_MAX);
++    pFormat->dwBitRate = (uint32_t)(std::min)(bit_rate, static_cast<double>(LONG_MAX));
+     pFormat->dwBitErrorRate = 0;
+-    pFormat->AvgTimePerFrame = (LONGLONG)std::round((std::min)(period, (float)LONG_MAX));
++    pFormat->AvgTimePerFrame = (LONGLONG)std::round((std::min)(period, static_cast<double>(LONG_MAX)));
+     pFormat->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+     pFormat->bmiHeader.biWidth = width;
+     pFormat->bmiHeader.biHeight = height;
+@@ -213,6 +214,10 @@ Softcam::SetFormat(AM_MEDIA_TYPE *mt)
+         LOG("-> E_FAIL (invalid media type)\n");
+         return E_FAIL;
+     }
++    if (mt->formattype != FORMAT_VideoInfo || !mt->pbFormat || mt->cbFormat < sizeof(VIDEOINFOHEADER))
++    {
++        return VFW_E_TYPE_NOT_ACCEPTED;
++    }
+     if (mt->formattype == FORMAT_VideoInfo && mt->pbFormat)
+     {
+         VIDEOINFOHEADER* pFormat = (VIDEOINFOHEADER*)mt->pbFormat;
+@@ -222,6 +227,11 @@ Softcam::SetFormat(AM_MEDIA_TYPE *mt)
+             LOG("-> E_FAIL (invalid dimension)\n");
+             return E_FAIL;
+         }
++        const REFERENCE_TIME expectedPeriod = (REFERENCE_TIME)std::llround(10000000.0 / (m_framerate > 0 ? m_framerate : 60.0f));
++        if (pFormat->AvgTimePerFrame > 0 && std::llabs(pFormat->AvgTimePerFrame - expectedPeriod) > 1)
++        {
++            return VFW_E_TYPE_NOT_ACCEPTED;
++        }
+         if (pFormat->bmiHeader.biBitCount != 24 ||
+             pFormat->bmiHeader.biCompression != BI_RGB)
+         {
+@@ -289,7 +299,7 @@ Softcam::GetStreamCaps(int index, AM_MEDIA_TYPE **out_pmt, BYTE *out_scc)
+         LOG("-> E_FAIL\n");
+         return E_FAIL;
+     }
+-    if (index >= 1)
++    if (index < 0 || index >= 1)
+     {
+         LOG("-> S_FALSE (invalid index)\n");
+         return S_FALSE;
+@@ -408,10 +418,14 @@ HRESULT SoftcamStream::FillBuffer(IMediaSample *pms)
+ {
+     CheckPointer(pms,E_POINTER);
+ 
+-    BYTE *pData;
+-    pms->GetPointer(&pData);
+-    long lDataLen = pms->GetSize();
+-    ZeroMemory(pData, (std::size_t)lDataLen);
++    BYTE *pData = nullptr;
++    HRESULT pointerResult = pms->GetPointer(&pData);
++    if (FAILED(pointerResult) || !pData) return E_POINTER;
++    const std::size_t imageSize = calcDIBSize(m_width, m_height);
++    if (pms->GetSize() < 0 || static_cast<std::size_t>(pms->GetSize()) < imageSize) return E_FAIL;
++    pms->SetActualDataLength(static_cast<LONG>(imageSize));
++    // Every active image is fully overwritten by transferToDIB. Do not clear
++    // another 24.9 MB per 4K frame before copying it.
+     {
+         if (auto fb = getParent()->getFrameBuffer())
+         {
+@@ -447,13 +461,16 @@ HRESULT SoftcamStream::FillBuffer(IMediaSample *pms)
+             Timer::sleep(0.100f);
+ 
+             const std::size_t size = calcDIBSize(m_width, m_height);
+-            std::memcpy(pData, m_screenshot.get(), size);
++            if (m_screenshot) std::memcpy(pData, m_screenshot.get(), size);
++            else ZeroMemory(pData, size);
+         }
+ 
+         CAutoLock lock(&m_critsec);
+-        CRefTime start = m_sample_time;
+-        m_sample_time += (LONG)m_interval_time_msec;
+-        pms->SetTime((REFERENCE_TIME*)&start,(REFERENCE_TIME*)&m_sample_time);
++        REFERENCE_TIME start = m_sample_time;
++        // Derive each boundary from the sample index rather than rounding the
++        // period to milliseconds (which incorrectly turns 240 FPS into 250).
++        m_sample_time = m_time_offset + static_cast<REFERENCE_TIME>(std::llround(++m_sample_index * m_period_100ns));
++        pms->SetTime(&start, &m_sample_time);
+     }
+     pms->SetSyncPoint(TRUE);
+     //LOG("-> NOERROR\n");
+@@ -464,9 +481,9 @@ HRESULT SoftcamStream::FillBuffer(IMediaSample *pms)
+ STDMETHODIMP SoftcamStream::Notify(IBaseFilter * pSender, Quality q)
+ {
+     CAutoLock lock(&m_critsec);
+-    m_interval_time_msec = m_interval_time_msec * 1000 / (std::max)(q.Proportion, 1L);
+-    m_interval_time_msec = (std::min)((std::max)(m_interval_time_msec, 1L), 1000L);
++    // A quality notification must not change the negotiated camera frame rate.
+     if (q.Late > 0) {
++        m_time_offset += q.Late;
+         m_sample_time += q.Late;
+     }
+     //LOG("-> NOERROR\n");
+@@ -536,7 +553,9 @@ HRESULT SoftcamStream::OnThreadCreate()
+         framerate = 60.0f;
+     }
+     framerate = (std::min)((std::max)(framerate, 1.0f), 1000.0f);
+-    m_interval_time_msec = (long)std::round(1000.0f / framerate);
++    m_period_100ns = 10000000.0 / framerate;
++    m_sample_index = 0;
++    m_time_offset = 0;
+ 
+     LOG("-> NOERROR\n");
+     return NOERROR;
+diff --git a/src/softcamcore/DShowSoftcam.h b/src/softcamcore/DShowSoftcam.h
+index fcecf93..bcea398 100644
+--- a/src/softcamcore/DShowSoftcam.h
++++ b/src/softcamcore/DShowSoftcam.h
+@@ -92,8 +92,10 @@ private:
+     std::unique_ptr<uint8_t[]>  m_screenshot;
+ 
+     CCritSec m_critsec;
+-    CRefTime m_sample_time;
+-    long m_interval_time_msec = 10;
++    REFERENCE_TIME m_sample_time = 0;
++    REFERENCE_TIME m_time_offset = 0;
++    uint64_t m_sample_index = 0;
++    double m_period_100ns = 10000000.0 / 60.0;
+ 
+     Softcam*        getParent();
+ };
+diff --git a/src/softcamcore/FrameBuffer.cpp b/src/softcamcore/FrameBuffer.cpp
+index ac6cd04..2a5ffdc 100644
+--- a/src/softcamcore/FrameBuffer.cpp
++++ b/src/softcamcore/FrameBuffer.cpp
+@@ -1,14 +1,15 @@
+ #include "FrameBuffer.h"
+ 
+ #include <windows.h>
++#include <cmath>
+ #include <mutex> // lock_guard
+ 
+ 
+ namespace softcam {
+ 
+ 
+-const char NamedMutexName[] = "DirectShow Softcam/NamedMutex";
+-const char SharedMemoryName[] = "DirectShow Softcam/SharedMemory";
++const char NamedMutexName[] = "PhoneCam/1BF2F2F1/NamedMutex";
++const char SharedMemoryName[] = "PhoneCam/1BF2F2F1/SharedMemory";
+ const uint8_t ProtocolVersion = 2;
+ 
+ 
+@@ -46,7 +47,7 @@ FrameBuffer FrameBuffer::create(
+     {
+         return fb;
+     }
+-    if (framerate < 0.0f)
++    if (!std::isfinite(framerate) || framerate < 0.0f || framerate > 240.0f)
+     {
+         return fb;
+     }
+@@ -105,13 +106,13 @@ FrameBuffer FrameBuffer::open()
+         }
+         auto frame = fb.header();
+         if (!checkDimensions(frame->m_width, frame->m_height) ||
+-            frame->m_framerate < 0.0f)
++            !std::isfinite(frame->m_framerate) || frame->m_framerate < 0.0f || frame->m_framerate > 240.0f)
+         {
+             fb.m_shmem = {};
+             return fb;
+         }
+         uint32_t image_size = (uint32_t)frame->m_width * (uint32_t)frame->m_height * 3;
+-        if (size <= frame->m_image_offset ||
++        if (frame->m_image_offset < sizeof(Header) || size <= frame->m_image_offset ||
+             size - frame->m_image_offset < image_size)
+         {
+             fb.m_shmem = {};
+@@ -148,6 +149,7 @@ FrameBuffer FrameBuffer::open()
+ FrameBuffer&
+ FrameBuffer::operator =(const FrameBuffer& fb)
+ {
++    if (this == &fb) return *this;
+     m_receiver_watchdog = {};
+     m_sender_watchdog = {};
+     m_shmem = {};
+@@ -254,6 +256,7 @@ void FrameBuffer::transferToDIB(void* image_bits, uint64_t* out_frame_counter)
+         {
+             const std::uint8_t* src = image + 3 * w * (h - 1 - y);
+             std::memcpy(dest, src, 3 * (uint32_t)w);
++            if (gap) std::memset(dest + 3 * w, 0, gap);
+             dest += 3 * w + gap;
+         }
+         *out_frame_counter = frame->m_frame_counter;
+diff --git a/src/softcamcore/Misc.cpp b/src/softcamcore/Misc.cpp
+index a4af02d..9f026e0 100644
+--- a/src/softcamcore/Misc.cpp
++++ b/src/softcamcore/Misc.cpp
+@@ -3,6 +3,7 @@
+ #include <windows.h>
+ #include <cmath>
+ #include <cassert>
++#include <algorithm>
+ 
+ 
+ namespace softcam {
+@@ -39,33 +40,29 @@ void Timer::sleep(float seconds)
+     {
+         return;
+     }
+-    unsigned delay_msec = (unsigned)std::round(seconds * 1000.0f);
+-    if (delay_msec == 0)
++    // Reuse one timer per thread. The old path created an event and multimedia
++    // timer for every wait, including the 1 ms frame polling loop.
++    struct SleepTimer
+     {
+-        delay_msec = 1;
+-    }
+-    HANDLE e = CreateEventA(nullptr, false, false, nullptr);
+-    if (e == nullptr)
++        HANDLE handle;
++        SleepTimer() : handle(CreateWaitableTimerExW(nullptr, nullptr, 0x00000002,
++                                                     TIMER_MODIFY_STATE | SYNCHRONIZE))
++        {
++            if (!handle) handle = CreateWaitableTimerW(nullptr, FALSE, nullptr);
++        }
++        ~SleepTimer() { if (handle) CloseHandle(handle); }
++    };
++    thread_local SleepTimer timer;
++    LARGE_INTEGER due;
++    due.QuadPart = -static_cast<LONGLONG>((std::max)(1.0, std::ceil(seconds * 10000000.0)));
++    if (timer.handle && SetWaitableTimer(timer.handle, &due, 0, nullptr, nullptr, FALSE))
+     {
+-        // fallback to older API
+-        Sleep(delay_msec);
+-        return;
++        WaitForSingleObject(timer.handle, INFINITE);
+     }
+-    MMRESULT ret = timeSetEvent(
+-                    delay_msec,
+-                    1,
+-                    (LPTIMECALLBACK)e,
+-                    0,
+-                    TIME_ONESHOT | TIME_CALLBACK_EVENT_SET);
+-    if (ret == 0)
++    else
+     {
+-        // fallback to older API
+-        CloseHandle(e);
+-        Sleep(delay_msec);
+-        return;
++        Sleep(static_cast<DWORD>((std::max)(1.0, std::ceil(seconds * 1000.0))));
+     }
+-    WaitForSingleObject(e, INFINITE);
+-    CloseHandle(e);
+ }
+ 
+ 
+diff --git a/src/softcamcore/SenderAPI.cpp b/src/softcamcore/SenderAPI.cpp
+index 2599b28..a9893f1 100644
+--- a/src/softcamcore/SenderAPI.cpp
++++ b/src/softcamcore/SenderAPI.cpp
+@@ -1,6 +1,8 @@
+ #include "SenderAPI.h"
+ 
+ #include <atomic>
++#include <mutex>
++#include <memory>
+ 
+ #include "FrameBuffer.h"
+ #include "Misc.h"
+@@ -12,9 +14,18 @@ struct Camera
+ {
+     softcam::FrameBuffer    m_frame_buffer;
+     softcam::Timer          m_timer;
++    std::mutex             m_send_mutex;
++    std::atomic<bool>      m_active{true};
+ };
+ 
+-std::atomic<Camera*>    s_camera;
++std::shared_ptr<Camera> s_camera;
++std::mutex s_camera_mutex;
++
++std::shared_ptr<Camera> acquireCamera(void* handle)
++{
++    std::lock_guard<std::mutex> lock(s_camera_mutex);
++    return s_camera.get() == handle ? s_camera : nullptr;
++}
+ 
+ } //namespace
+ 
+@@ -24,34 +35,37 @@ namespace sender {
+ 
+ CameraHandle    CreateCamera(int width, int height, float framerate)
+ {
++    std::lock_guard<std::mutex> lock(s_camera_mutex);
++    if (s_camera) return nullptr;
+     if (auto fb = FrameBuffer::create(width, height, framerate))
+     {
+-        Camera* camera = new Camera{ fb, Timer() };
+-        Camera* expected = nullptr;
+-        if (s_camera.compare_exchange_strong(expected, camera))
+-        {
+-            return camera;
+-        }
+-        delete camera;
++        s_camera.reset(new Camera{ fb, Timer() });
++        return s_camera.get();
+     }
+     return nullptr;
+ }
+ 
+ void            DeleteCamera(CameraHandle camera)
+ {
+-    Camera* target = static_cast<Camera*>(camera);
+-    if (target && s_camera.compare_exchange_strong(target, nullptr))
++    std::shared_ptr<Camera> target;
+     {
+-        target->m_frame_buffer.deactivate();
+-        delete target;
++        std::lock_guard<std::mutex> lock(s_camera_mutex);
++        if (!camera || s_camera.get() != camera) return;
++        target = std::move(s_camera);
+     }
++    target->m_active = false;
++    // In-flight API calls hold their own reference until they leave.
++    std::lock_guard<std::mutex> lock(target->m_send_mutex);
++    target->m_frame_buffer.deactivate();
+ }
+ 
+ void            SendFrame(CameraHandle camera, const void* image_bits)
+ {
+-    Camera* target = static_cast<Camera*>(camera);
+-    if (target && s_camera.load() == target && image_bits)
++    auto target = acquireCamera(camera);
++    if (target && image_bits)
+     {
++        std::lock_guard<std::mutex> lock(target->m_send_mutex);
++        if (!target->m_active) return;
+         auto framerate = target->m_frame_buffer.framerate();
+         auto frame_counter = target->m_frame_buffer.frameCounter();
+ 
+@@ -94,11 +108,11 @@ void            SendFrame(CameraHandle camera, const void* image_bits)
+ 
+ bool            WaitForConnection(CameraHandle camera, float timeout)
+ {
+-    Camera* target = static_cast<Camera*>(camera);
+-    if (target && s_camera.load() == target)
++    auto target = acquireCamera(camera);
++    if (target && target->m_active)
+     {
+         Timer timer;
+-        while (!target->m_frame_buffer.connected())
++        while (target->m_active && !target->m_frame_buffer.connected())
+         {
+             if (0.0f < timeout && timeout <= timer.get())
+             {
+@@ -106,15 +120,15 @@ bool            WaitForConnection(CameraHandle camera, float timeout)
+             }
+             Timer::sleep(0.001f);
+         }
+-        return true;
++        return target->m_active;
+     }
+     return false;
+ }
+ 
+ bool            IsConnected(CameraHandle camera)
+ {
+-    Camera* target = static_cast<Camera*>(camera);
+-    if (target && s_camera.load() == target)
++    auto target = acquireCamera(camera);
++    if (target && target->m_active)
+     {
+         return target->m_frame_buffer.connected();
+     }

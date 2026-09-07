@@ -31,10 +31,26 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginBottom="28dp"
-            android:text="Wi-Fi RTSP camera server"
+            android:text="Your phone. Your computer. One camera."
             android:textColor="#AAFFFFFF"
             android:textSize="14sp" />
 
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Open PhoneCam Receiver on your computer, then find it below."
+            android:textColor="#FFFFFFFF" android:textSize="16sp" android:paddingBottom="12dp" />
+        <Button android:id="@+id/findComputerBtn" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Find my computer" />
+        <TextView android:id="@+id/easyConnectionStatus" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Use the same home network. Allow local-network access when asked."
+            android:textColor="#FFCBD5E1" android:padding="12dp" />
+        <EditText android:id="@+id/receiverCodeEdit" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="PC code or computer IP address" android:inputType="textNoSuggestions" android:singleLine="true"
+            android:textColor="#FFFFFFFF" android:textColorHint="#FF94A3B8" android:minHeight="48dp" />
+        <Button android:id="@+id/connectComputerBtn" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Connect with code" />
+        <Button android:id="@+id/stopComputerBtn" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Stop connection" android:visibility="gone" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Selecting a computer starts your camera. Streaming stops when you leave this app."
+            android:textColor="#FF94A3B8" android:padding="12dp" />
+        <Button android:id="@+id/advancedConnectionBtn" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Advanced connection options" />
+        <LinearLayout android:id="@+id/advancedConnectionPanel" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -159,7 +175,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
-            android:text="4K60 UDP (experimental)"
+            android:text="High resolution and high frame rate"
             android:textColor="#FFFFFFFF"
             android:textSize="14sp" />
 
@@ -170,9 +186,22 @@
             android:layout_marginBottom="12dp"
             android:background="#FF1F2933"
             android:padding="12dp"
-            android:text="Probing 4K60 capability..."
+            android:text="Checking camera and encoder modes..."
             android:textColor="#AAFFFFFF"
             android:textSize="13sp" />
+
+        <Spinner
+            android:id="@+id/streamModeSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:contentDescription="Camera resolution and frame rate" />
+
+        <CheckBox
+            android:id="@+id/remoteCameraControl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Allow a receiver on this network to start the camera while this screen is open"
+            android:textColor="#FFFFFFFF" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -214,7 +243,7 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
             android:padding="12dp"
-            android:text="Start 4K60 UDP"
+            android:text="Start camera stream"
             android:textSize="16sp" />
 
         <TextView
@@ -225,6 +254,7 @@
             android:textAlignment="center"
             android:textColor="#AAFFFFFF"
             android:textSize="13sp" />
+        </LinearLayout>
     </LinearLayout>
     </ScrollView>
 

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1A11000A2C4BAA0900111111 = {isa = PBXBuildFile; fileRef = 1A11001A2C4BAA0900111111; };
 		1A1100012C4BAA0100111111 /* PhoneCamSendApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100112C4BAA0100111111 /* PhoneCamSendApp.swift */; };
 		1A1100022C4BAA0200111111 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100122C4BAA0200111111 /* ContentView.swift */; };
 		1A1100032C4BAA0300111111 /* CaptureEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1100132C4BAA0300111111 /* CaptureEncoder.swift */; };
@@ -29,6 +30,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		1A11001A2C4BAA0900111111 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiverBrowser.swift; sourceTree = "<group>"; };
 		1A1111112C4BA11100111111 /* PhoneCamSend.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhoneCamSend.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A1111122C4BA11200111111 /* PhoneCamSendTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PhoneCamSendTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A1100112C4BAA0100111111 /* PhoneCamSendApp.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PhoneCamSendApp.swift; sourceTree = "<group>"; };
@@ -73,6 +75,7 @@
 			children = (
 				1A1100112C4BAA0100111111 /* PhoneCamSendApp.swift */,
 				1A1100122C4BAA0200111111 /* ContentView.swift */,
+                1A11001A2C4BAA0900111111,
 				1A1100132C4BAA0300111111 /* CaptureEncoder.swift */,
 				1A1100142C4BAA0400111111 /* RtpSwiftPacketizer.swift */,
 				1A1100152C4BAA0500111111 /* ControlClient.swift */,
@@ -179,6 +182,7 @@
 			files = (
 				1A1100012C4BAA0100111111 /* PhoneCamSendApp.swift in Sources */,
 				1A1100022C4BAA0200111111 /* ContentView.swift in Sources */,
+                1A11000A2C4BAA0900111111,
 				1A1100032C4BAA0300111111 /* CaptureEncoder.swift in Sources */,
 				1A1100042C4BAA0400111111 /* RtpSwiftPacketizer.swift in Sources */,
 				1A1100052C4BAA0500111111 /* ControlClient.swift in Sources */,
@@ -217,7 +221,9 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = PhoneCamSend;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Camera access required to stream";
+                INFOPLIST_FILE = PhoneCamSend/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Send camera video to the receiver you enable on your local network.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to your computer to stream camera video on your local network.";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -244,7 +250,9 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = PhoneCamSend;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Camera access required to stream";
+                INFOPLIST_FILE = PhoneCamSend/Info.plist;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Send camera video to the receiver you enable on your local network.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to your computer to stream camera video on your local network.";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

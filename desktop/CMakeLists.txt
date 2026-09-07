@@ -27,25 +27,35 @@ add_library(phonecam-core STATIC
   core/playout_buffer.h
   core/phonecam_client.cpp
   core/phonecam_client.h
+  core/receiver_connection.cpp
   core/discovery.cpp
   core/discovery.h
 )
+
+find_package(Threads REQUIRED)
+target_link_libraries(phonecam-core PUBLIC Threads::Threads)
 
 target_include_directories(phonecam-core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/core
 )
 
 if(WIN32)
-  target_link_libraries(phonecam-core PUBLIC ws2_32)
+  target_compile_definitions(phonecam-core PUBLIC NOMINMAX)
+  target_link_libraries(phonecam-core PUBLIC ws2_32 iphlpapi dnsapi)
 endif()
 
 if(PHONECAM_TARGET STREQUAL "windows" OR (WIN32 AND NOT PHONECAM_TARGET STREQUAL "macos"))
   add_subdirectory(windows)
-elseif(PHONECAM_TARGET STREQUAL "macos" OR APPLE)
+elseif(PHONECAM_TARGET STREQUAL "macos")
   add_subdirectory(macos)
 endif()
 
 if(BUILD_TESTING)
+  add_executable(pipeline-tests tests/pipeline_tests.cpp)
+  target_link_libraries(pipeline-tests PRIVATE phonecam-core)
+  add_test(NAME pipeline-memory-tests COMMAND pipeline-tests)
+  add_test(NAME pipeline-network-tests COMMAND pipeline-tests --network)
+  set_tests_properties(pipeline-network-tests PROPERTIES TIMEOUT 30)
   add_executable(conformance-tests
     tests/conformance_tests.cpp
   )
@@ -54,6 +64,7 @@ if(BUILD_TESTING)
   )
   add_test(NAME conformance-tests COMMAND conformance-tests "${CMAKE_CURRENT_SOURCE_DIR}/../docs/protocol-vectors")
 
+  if(NOT WIN32)
   add_executable(phonecam-soak-sender
     tests/phonecam_soak_sender.cpp
   )
@@ -61,5 +72,12 @@ if(BUILD_TESTING)
     phonecam-core
   )
 
-  add_test(NAME soak-test COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/soak_4k60.sh" --duration 10)
+  endif()
+
+  # The hardware soak is opt-in; conformance must not silently depend on devices.
+  if(MSVC)
+    target_compile_options(conformance-tests PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(conformance-tests PRIVATE -UNDEBUG)
+  endif()
 endif()

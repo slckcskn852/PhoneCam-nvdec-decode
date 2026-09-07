@@ -14,6 +14,7 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     private var captureSession: AVCaptureSession?
     private var compressionSession: VTCompressionSession?
     private let queue = DispatchQueue(label: "com.phonecam.stream4k.capture")
+    private let queueKey = DispatchSpecificKey<Bool>()
     
     private var width: Int = 1920
     private var height: Int = 1080
@@ -26,8 +27,33 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     public init(delegate: CaptureEncoderDelegate? = nil) {
         self.delegate = delegate
         super.init()
+        queue.setSpecific(key: queueKey, value: true)
     }
     
+    deinit {
+        // stop() synchronously drains callbacks before the unretained VT refcon dies.
+        captureSession?.stopRunning()
+        teardownEncoder()
+    }
+
+    private func onCaptureQueue(_ action: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueKey) == true { action() }
+        else { queue.sync(execute: action) }
+    }
+
+    public static func availableLadders() -> [Ladder] {
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else { return [] }
+        return ControlClient.candidateLadders.filter { mode in
+            camera.formats.contains { format in
+                let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                return dimensions.width == mode.width && dimensions.height == mode.height &&
+                    format.videoSupportedFrameRateRanges.contains {
+                        $0.minFrameRate <= Double(mode.fps) && $0.maxFrameRate >= Double(mode.fps)
+                    }
+            }
+        }
+    }
+
     public func configure(width: Int, height: Int, fps: Int, bitrateBps: Int) {
         lock.lock()
         defer { lock.unlock() }
@@ -43,9 +69,13 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         guard !isStreaming else { return }
         isStreaming = true
         
-        queue.async { [weak self] in
-            guard let self = self else { return }
+        queue.async { [self] in
+            lock.lock(); let active = isStreaming; lock.unlock()
+            guard active else { return }
             self.setupCapture()
+            #if !targetEnvironment(simulator)
+            guard self.captureSession != nil else { return }
+            #endif
             self.setupEncoder()
             #if !targetEnvironment(simulator)
             self.captureSession?.startRunning()
@@ -55,12 +85,9 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     
     public func stop() {
         lock.lock()
-        defer { lock.unlock() }
-        guard isStreaming else { return }
         isStreaming = false
-        
-        queue.async { [weak self] in
-            guard let self = self else { return }
+        lock.unlock()
+        onCaptureQueue {
             #if !targetEnvironment(simulator)
             self.captureSession?.stopRunning()
             #endif
@@ -68,28 +95,16 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             self.teardownEncoder()
         }
     }
-    
+
     public func setBitrate(_ bitrateBps: Int) {
-        lock.lock()
-        self.bitrateBps = bitrateBps
-        let session = compressionSession
-        lock.unlock()
-        
-        guard let session = session else { return }
-        var bitrate = Int32(bitrateBps)
-        let bitrateNum = CFNumberCreate(kCFAllocatorDefault, .sInt32Type, &bitrate)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateNum)
-        
-        var byteLimit = Int64(Double(bitrateBps) * 1.5 / 8.0)
-        var duration: Double = 1.0
-        let limitArrayValues: [CFNumber?] = [
-            CFNumberCreate(kCFAllocatorDefault, .sInt64Type, &byteLimit),
-            CFNumberCreate(kCFAllocatorDefault, .doubleType, &duration)
-        ]
-        let limitArray = limitArrayValues as CFArray
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limitArray)
+        queue.async { [weak self] in
+            guard let self = self, let session = self.compressionSession else { return }
+            self.bitrateBps = max(1_000_000, min(bitrateBps, 80_000_000))
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                                 value: self.bitrateBps as CFNumber)
+        }
     }
-    
+
     public func requestKeyFrame() {
         lock.lock()
         forceKeyFrameFlag = true
@@ -104,6 +119,8 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         #else
         let session = AVCaptureSession()
         session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        session.sessionPreset = .inputPriority
         
         guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             delegate?.captureEncoderDidError(self, message: "No back camera available")
@@ -124,7 +141,7 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
                 let dims = CMVideoFormatDescriptionGetDimensions(desc)
                 if dims.width == self.width && dims.height == self.height {
                     for range in format.videoSupportedFrameRateRanges {
-                        if Int(range.maxFrameRate) >= self.fps {
+                        if range.minFrameRate <= Double(self.fps) && range.maxFrameRate >= Double(self.fps) {
                             bestFormat = format
                             bestFrameRateRange = range
                             break
@@ -134,22 +151,26 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
                 if bestFormat != nil { break }
             }
             
-            if let format = bestFormat, let range = bestFrameRateRange {
+            guard let format = bestFormat, bestFrameRateRange != nil else {
+                delegate?.captureEncoderDidError(self, message: "Requested camera size/FPS is unavailable")
+                return
+            }
+            do {
                 try camera.lockForConfiguration()
                 camera.activeFormat = format
-                camera.activeVideoMinFrameDuration = range.minFrameDuration
-                camera.activeVideoMaxFrameDuration = range.minFrameDuration
+                camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(self.fps))
+                camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(self.fps))
                 camera.unlockForConfiguration()
             }
             
             let output = AVCaptureVideoDataOutput()
             output.alwaysDiscardsLateVideoFrames = true
+            output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
             output.setSampleBufferDelegate(self, queue: queue)
             if session.canAddOutput(output) {
                 session.addOutput(output)
             }
             
-            session.commitConfiguration()
             self.captureSession = session
         } catch {
             delegate?.captureEncoderDidError(self, message: "Camera setup failed: \(error.localizedDescription)")
@@ -179,12 +200,16 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         
         let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         
+        var specification: CFDictionary? = nil
+        if #available(iOS 17.4, *) {
+            specification = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
+        }
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width),
             height: Int32(height),
             codecType: kCMVideoCodecType_HEVC,
-            encoderSpecification: nil,
+            encoderSpecification: specification,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: encoderCallback,
@@ -198,6 +223,8 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         }
         
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
         
         var bitrate = Int32(self.bitrateBps)
@@ -219,6 +246,7 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     
     private func teardownEncoder() {
         if let session = compressionSession {
+            VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(session)
             self.compressionSession = nil
         }
@@ -228,7 +256,7 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         
         lock.lock()
-        let session = compressionSession
+        let session = isStreaming ? compressionSession : nil
         let forceKeyFrame = forceKeyFrameFlag
         if forceKeyFrame {
             forceKeyFrameFlag = false
@@ -278,16 +306,17 @@ public class CaptureEncoder: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         
         guard status == noErr, let rawData = dataPointer else { return }
         
-        var annexB = Data()
+        guard length <= 8 * 1024 * 1024 else { return }
+        var annexB = Data(capacity: length + 256)
         var offset = 0
-        while offset < length {
+        while offset + 4 <= length {
             var nalLength: UInt32 = 0
             let ptr = rawData.advanced(by: offset)
             memcpy(&nalLength, ptr, 4)
             nalLength = CFSwapInt32BigToHost(nalLength)
             offset += 4
             
-            if offset + Int(nalLength) <= length {
+            if nalLength > 0 && Int(nalLength) <= length - offset {
                 let startCode = Data([0x00, 0x00, 0x00, 0x01])
                 annexB.append(startCode)
                 let nalData = Data(bytes: ptr.advanced(by: 4), count: Int(nalLength))

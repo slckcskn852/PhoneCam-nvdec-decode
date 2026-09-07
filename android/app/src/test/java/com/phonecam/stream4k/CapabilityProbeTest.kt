@@ -61,14 +61,14 @@ class CapabilityProbeTest {
     }
 
     @Test
-    fun flagsHighSpeedSessionWhen60FpsOnlyAvailableViaHighSpeedSizes() {
+    fun rejects60FpsConstrainedModeAndFallsBackToNormalSession() {
         val normalSession = setOf(combo4k30, combo1080p60)
 
         val ladder = CapabilityProbe.chooseLadder(allCombos, hevcOk = true, normalSessionSupported = normalSession)
 
         assertNotNull(ladder)
-        assertEquals(60, ladder!!.fps)
-        assertTrue(ladder.needsHighSpeedSession)
+        assertEquals(30, ladder!!.fps)
+        assertFalse(ladder.needsHighSpeedSession)
         assertTrue(ladder.reason.isNotEmpty())
     }
 
@@ -81,13 +81,29 @@ class CapabilityProbeTest {
     }
 
     @Test
-    fun flagsHighSpeedSessionFor1080p60WhenOnlyHighSpeed() {
-        val supported = setOf(combo1080p60)
-        val ladder = CapabilityProbe.chooseLadder(supported, hevcOk = true, normalSessionSupported = emptySet())
+    fun rejects1080p60WhenOnlyHighSpeed() {
+        assertNull(CapabilityProbe.chooseLadder(setOf(combo1080p60), true, emptySet()))
+    }
 
-        assertNotNull(ladder)
-        assertEquals(1080, ladder!!.height)
-        assertTrue(ladder.needsHighSpeedSession)
+    @Test
+    fun highFrameRateModesUseConstrainedSessions() {
+        for (fps in listOf(120, 240)) {
+            val mode = CapabilityProbe.chooseLadder(setOf(Triple(1920, 1080, fps)), true, emptySet())!!
+            assertEquals(fps, mode.fps)
+            assertTrue(mode.needsHighSpeedSession)
+        }
+    }
+
+    @Test
+    fun cameraAndEncoderMustAgreeBeforeAdvertisingMode() {
+        val source = object : DeviceCapabilitiesSource {
+            override fun supportedCombos() = allCombos + Triple(1920, 1080, 240)
+            override fun normalSessionCombos() = allCombos
+            override fun hasHevcEncoder() = true
+            override fun hevcEncoderSupports(width: Int, height: Int, fps: Int) = width == 1920 && fps == 60
+            override fun encoderNames() = listOf("test.encoder")
+        }
+        assertEquals(listOf(combo1080p60), source.availableLadders().map { it.combo })
     }
 
     @Test

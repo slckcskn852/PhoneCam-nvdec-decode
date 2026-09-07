@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace 'com.phonecam'
-    compileSdk 34
+    compileSdk 36
 
     testOptions {
         unitTests.returnDefaultValues = true
@@ -14,13 +14,13 @@ android {
     defaultConfig {
         applicationId 'com.phonecam'
         minSdk 24
-        targetSdk 34
+        targetSdk 36
         versionCode 1
         versionName '0.1.0'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         vectorDrawables { useSupportLibrary = true }
         
-        // Force 16 KB page alignment for Android 15+ compatibility
+        // Supported ABIs. Native ELF alignment is verified on the final bundle.
         ndk {
             //noinspection ChromeOsAbiSupport
             abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
@@ -36,9 +36,9 @@ android {
         release {
             minifyEnabled = false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug
+            // Release signing is supplied by the distributor; never use the debug key.
             
-            // Enable 16 KB page alignment
+            // Retain native symbols for diagnostics
             ndk {
                 debugSymbolLevel 'FULL'
             }
@@ -46,7 +46,7 @@ android {
         debug {
             debuggable = true
             
-            // Enable 16 KB page alignment for debug builds too
+            // Retain native symbols for diagnostics for debug builds too
             ndk {
                 debugSymbolLevel 'FULL'
             }
@@ -59,7 +59,7 @@ android {
         }
     }
 
-    // Enable 16 KB page size support
+    // Model assets are stored without compression
     androidResources {
         noCompress 'tflite'
     }

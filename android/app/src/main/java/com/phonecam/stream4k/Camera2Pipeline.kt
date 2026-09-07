@@ -37,6 +37,7 @@ class Camera2Pipeline(context: Context) {
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     @Volatile private var active = false
+    private var generation = 0L
 
     // Caller verifies CAMERA permission before calling open().
     @SuppressLint("MissingPermission")
@@ -52,7 +53,8 @@ class Camera2Pipeline(context: Context) {
         handlerThread = thread
         val cameraHandler = Handler(thread.looper)
         handler = cameraHandler
-        val cameraId = findBackCameraId(manager)
+        val token = generation
+        val cameraId = ladder.cameraId ?: findBackCameraId(manager)
         if (cameraId == null) {
             stateCallback?.onError("No back camera found")
             stopHandlerThread()
@@ -63,25 +65,23 @@ class Camera2Pipeline(context: Context) {
             manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
                     synchronized(this@Camera2Pipeline) {
-                        if (!active) {
+                        if (!active || token != generation) {
                             device.close()
                             return
                         }
                         cameraDevice = device
                     }
-                    createSession(device, ladder, encoderSurface, cameraHandler)
+                    createSession(device, ladder, encoderSurface, cameraHandler, token)
                 }
 
                 override fun onDisconnected(device: CameraDevice) {
                     device.close()
-                    stateCallback?.onError("Camera disconnected")
-                    close()
+                    failIfCurrent(token, "Camera disconnected")
                 }
 
                 override fun onError(device: CameraDevice, error: Int) {
                     device.close()
-                    stateCallback?.onError("Camera error $error")
-                    close()
+                    failIfCurrent(token, "Camera error $error")
                 }
             }, cameraHandler)
         } catch (e: Exception) {
@@ -93,6 +93,7 @@ class Camera2Pipeline(context: Context) {
 
     @Synchronized
     fun close() {
+        generation++
         active = false
         try {
             captureSession?.close()
@@ -109,13 +110,20 @@ class Camera2Pipeline(context: Context) {
         stopHandlerThread()
     }
 
+    @Synchronized
+    private fun failIfCurrent(token: Long, message: String) {
+        if (token != generation) return
+        close()
+        stateCallback?.onError(message)
+    }
+
     private fun stopHandlerThread() {
         handlerThread?.quitSafely()
         handlerThread = null
         handler = null
     }
 
-    private fun createSession(device: CameraDevice, ladder: Ladder, surface: Surface, cameraHandler: Handler) {
+    private fun createSession(device: CameraDevice, ladder: Ladder, surface: Surface, cameraHandler: Handler, token: Long) {
         try {
             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(surface)
@@ -126,29 +134,31 @@ class Camera2Pipeline(context: Context) {
             val sessionStateCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     synchronized(this@Camera2Pipeline) {
-                        if (!active) {
+                        if (!active || token != generation || cameraDevice !== device) {
                             session.close()
                             return
                         }
                         captureSession = session
+                        startRepeating(session, ladder, request, cameraHandler, token)
                     }
-                    startRepeating(session, ladder, request, cameraHandler)
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
-                    stateCallback?.onError("Capture session configuration failed")
-                    close()
+                    session.close()
+                    failIfCurrent(token, "Capture session configuration failed")
                 }
 
                 override fun onClosed(session: CameraCaptureSession) {
-                    stateCallback?.onStreamingStopped()
+                    synchronized(this@Camera2Pipeline) {
+                        if (token == generation) stateCallback?.onStreamingStopped()
+                    }
                 }
             }
 
             if (ladder.needsHighSpeedSession) {
                 if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) {
-                    stateCallback?.onError("High-speed sessions require Android 9+")
-                    close()
+                    @Suppress("DEPRECATION")
+                    device.createConstrainedHighSpeedCaptureSession(listOf(surface), sessionStateCallback, cameraHandler)
                     return
                 }
                 val configuration = SessionConfiguration(
@@ -163,8 +173,7 @@ class Camera2Pipeline(context: Context) {
                 device.createCaptureSession(listOf(surface), sessionStateCallback, cameraHandler)
             }
         } catch (e: Exception) {
-            stateCallback?.onError("Capture session create failed: ${e.message}")
-            close()
+            failIfCurrent(token, "Capture session create failed: ${e.message}")
         }
     }
 
@@ -172,7 +181,8 @@ class Camera2Pipeline(context: Context) {
         session: CameraCaptureSession,
         ladder: Ladder,
         request: CaptureRequest,
-        cameraHandler: Handler
+        cameraHandler: Handler,
+        token: Long
     ) {
         try {
             if (ladder.needsHighSpeedSession) {
@@ -184,8 +194,7 @@ class Camera2Pipeline(context: Context) {
             }
             stateCallback?.onStreamingStarted()
         } catch (e: Exception) {
-            stateCallback?.onError("Repeating request failed: ${e.message}")
-            close()
+            failIfCurrent(token, "Repeating request failed: ${e.message}")
         }
     }
 

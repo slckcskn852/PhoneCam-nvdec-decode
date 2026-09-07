@@ -6,6 +6,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Sends RTP-packetized HEVC access units to a fixed (ip, port) over UDP.
@@ -18,6 +19,7 @@ class UdpStreamSender(
     private val targetIp: String,
     private val targetPort: Int,
     private val packetizer: RtpHevcPacketizer = RtpHevcPacketizer(),
+    private val onKeyFrameNeeded: (() -> Unit)? = null,
     private val onStats: ((Stats) -> Unit)? = null
 ) {
     data class Stats(
@@ -32,6 +34,7 @@ class UdpStreamSender(
     private data class QueuedAccessUnit(val annexB: ByteArray, val ptsUs: Long)
 
     private val queue = ArrayBlockingQueue<QueuedAccessUnit>(QUEUE_CAPACITY_AUS)
+    private val awaitingKeyFrame = AtomicBoolean(false)
     private val framesSent = AtomicLong()
     private val packetsSent = AtomicLong()
     private val bytesSent = AtomicLong()
@@ -58,12 +61,20 @@ class UdpStreamSender(
     /** Called on the encoder thread. Never blocks: drops the oldest AU when full. */
     fun onAccessUnit(annexB: ByteArray, ptsUs: Long, isKeyFrame: Boolean) {
         if (!running) return
+        if (annexB.size > 8 * 1024 * 1024) {
+            droppedFrames.incrementAndGet()
+            if (!awaitingKeyFrame.getAndSet(true)) onKeyFrameNeeded?.invoke()
+            return
+        }
+        if (awaitingKeyFrame.get() && !isKeyFrame) { droppedFrames.incrementAndGet(); return }
+        if (isKeyFrame) awaitingKeyFrame.set(false)
         // Key frames are preceded by parameter sets; keep them as-is, the
         // packetizer drops AUD and passes VPS/SPS/PPS through.
         if (!queue.offer(QueuedAccessUnit(annexB, ptsUs))) {
-            queue.poll()
-            droppedFrames.incrementAndGet()
-            queue.offer(QueuedAccessUnit(annexB, ptsUs))
+            droppedFrames.addAndGet(queue.size.toLong() + 1)
+            queue.clear()
+            awaitingKeyFrame.set(true)
+            onKeyFrameNeeded?.invoke()
         }
     }
 
@@ -86,13 +97,14 @@ class UdpStreamSender(
     @Synchronized
     fun stop() {
         running = false
-        senderThread?.join(1_000)
-        senderThread = null
         try {
             socket?.close()
         } catch (e: Exception) {
             Log.w(TAG, "Socket close failed", e)
         }
+        senderThread?.interrupt()
+        senderThread?.takeIf { it !== Thread.currentThread() }?.join()
+        senderThread = null
         socket = null
         queue.clear()
     }
@@ -113,6 +125,7 @@ class UdpStreamSender(
             return
         }
         socket = datagramSocket
+        if (!running) { datagramSocket.close(); return }
 
         var windowStartMs = System.currentTimeMillis()
         var windowFrames = 0L
@@ -132,6 +145,7 @@ class UdpStreamSender(
                 continue
             }
             for (packet in packets) {
+                if (!running) break;
                 try {
                     datagramSocket.send(DatagramPacket(packet, packet.size, address, targetPort))
                     packetsSent.incrementAndGet()
@@ -171,6 +185,6 @@ class UdpStreamSender(
 
     companion object {
         private const val TAG = "UdpStreamSender"
-        private const val QUEUE_CAPACITY_AUS = 8
+        private const val QUEUE_CAPACITY_AUS = 4
     }
 }

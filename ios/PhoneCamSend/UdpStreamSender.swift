@@ -10,181 +10,136 @@ public class UdpStreamSender {
         public let fps: Int
         public let mbps: Double
     }
-
-    private struct QueuedAccessUnit {
-        let annexB: Data
-        let ptsUs: Int64
-    }
-
+    private struct AccessUnit { let data: Data; let pts: Int64 }
     private let targetIp: String
     private let targetPort: UInt16
     private let packetizer: RtpSwiftPacketizer
     private let onStats: ((Stats) -> Void)?
-
-    private var connection: NWConnection?
-    private var queue = [QueuedAccessUnit]()
-    private let queueLimit = 8
-    
-    private var framesSent: Int64 = 0
-    private var packetsSent: Int64 = 0
-    private var bytesSent: Int64 = 0
-    private var droppedFrames: Int64 = 0
-    
-    private var running = false
+    private let onKeyFrameNeeded: (() -> Void)?
     private let lock = NSLock()
     private let streamQueue = DispatchQueue(label: "com.phonecam.stream4k.udpsender")
-    private var timer: DispatchSourceTimer?
+    private var connection: NWConnection?
+    private var queue: [AccessUnit] = []
+    private var running = false
+    private var awaitingKeyFrame = false
+    private var sending = false
+    private var ready = false
+    private var generation = 0
+    private var retransmissionsInFlight = 0
+    private var framesSent: Int64 = 0, packetsSent: Int64 = 0, bytesSent: Int64 = 0, droppedFrames: Int64 = 0
+    private var lastReport = ProcessInfo.processInfo.systemUptime
+    private var reportFrames: Int64 = 0, reportBytes: Int64 = 0
 
-    public init(targetIp: String, targetPort: UInt16, packetizer: RtpSwiftPacketizer, onStats: ((Stats) -> Void)? = nil) {
-        self.targetIp = targetIp
-        self.targetPort = targetPort
-        self.packetizer = packetizer
-        self.onStats = onStats
+    public init(targetIp: String, targetPort: UInt16, packetizer: RtpSwiftPacketizer,
+                onKeyFrameNeeded: (() -> Void)? = nil, onStats: ((Stats) -> Void)? = nil) {
+        self.targetIp = targetIp; self.targetPort = targetPort; self.packetizer = packetizer
+        self.onKeyFrameNeeded = onKeyFrameNeeded; self.onStats = onStats
     }
-
     public func start() {
-        lock.lock()
-        defer { lock.unlock() }
-        if running { return }
+        lock.lock(); defer { lock.unlock() }
+        guard !running, let port = NWEndpoint.Port(rawValue: targetPort) else { return }
         running = true
-        
-        queue.removeAll()
-        framesSent = 0
-        packetsSent = 0
-        bytesSent = 0
-        droppedFrames = 0
-        
-        let connection = NWConnection(host: NWEndpoint.Host(targetIp), port: NWEndpoint.Port(rawValue: targetPort)!, using: .udp)
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .failed(let error):
-                print("UdpStreamSender: Connection failed: \(error)")
-            default:
-                break
-            }
+        generation += 1
+        let token = generation
+        let connection = NWConnection(host: NWEndpoint.Host(targetIp), port: port, using: .udp)
+        self.connection = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            self.lock.lock()
+            guard self.generation == token else { self.lock.unlock(); return }
+            if case .ready = state { self.ready = true }
+            if case .failed = state { self.running = false; self.queue.removeAll() }
+            self.lock.unlock()
+            self.drainNext()
         }
         connection.start(queue: streamQueue)
-        self.connection = connection
-        
-        startLoop()
     }
-
     public func stop() {
         lock.lock()
-        running = false
-        connection?.cancel()
-        connection = nil
-        timer?.cancel()
-        timer = nil
-        queue.removeAll()
+        running = false; ready = false; sending = false; generation += 1
+        let old = connection; connection = nil; queue.removeAll()
         lock.unlock()
+        old?.cancel()
     }
-
-    public func onAccessUnit(annexB: Data, ptsUs: Int64) {
+    public func onAccessUnit(annexB: Data, ptsUs: Int64, isKeyFrame: Bool = true) {
         lock.lock()
-        guard running else {
-            lock.unlock()
-            return
+        guard running else { lock.unlock(); return }
+        if annexB.count > 8 * 1024 * 1024 || queue.count >= 4 {
+            droppedFrames += Int64(queue.count + 1); queue.removeAll(); awaitingKeyFrame = true
+            lock.unlock(); onKeyFrameNeeded?(); return
         }
-        
-        if queue.count >= queueLimit {
-            queue.removeFirst()
-            droppedFrames += 1
-        }
-        queue.append(QueuedAccessUnit(annexB: annexB, ptsUs: ptsUs))
+        if awaitingKeyFrame && !isKeyFrame { droppedFrames += 1; lock.unlock(); return }
+        if isKeyFrame { awaitingKeyFrame = false }
+        queue.append(AccessUnit(data: annexB, pts: ptsUs))
         lock.unlock()
+        streamQueue.async { [weak self] in self?.drainNext() }
     }
-
+    private func drainNext() {
+        lock.lock()
+        guard running, ready, !sending, !queue.isEmpty, let connection = connection else { lock.unlock(); return }
+        sending = true
+        let unit = queue.removeFirst(), token = generation
+        lock.unlock()
+        let packets = packetizer.packetize(accessUnit: unit.data, ptsUs: unit.pts)
+        sendBatch(packets, offset: 0, connection: connection, token: token)
+    }
+    // At most 64 Network.framework datagrams are outstanding for the active AU.
+    // A completion releases the next batch; the OS queue cannot grow with stream duration.
+    private func sendBatch(_ packets: [Data], offset: Int, connection: NWConnection, token: Int) {
+        lock.lock()
+        guard running && generation == token else { lock.unlock(); return }
+        if offset == packets.count {
+            framesSent += 1; sending = false
+            reportIfDueLocked()
+            lock.unlock(); drainNext(); return
+        }
+        lock.unlock()
+        let end = min(offset + 64, packets.count)
+        var remaining = end - offset
+        var failed = false
+        connection.batch {
+            for index in offset..<end {
+                let packet = packets[index]
+                connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+                    guard let self = self else { return }
+                    // Completions execute on streamQueue, so remaining/failed are serialized.
+                    if error != nil { failed = true }
+                    self.lock.lock()
+                    if self.generation == token && error == nil {
+                        self.packetsSent += 1; self.bytesSent += Int64(packet.count)
+                    }
+                    self.lock.unlock()
+                    remaining -= 1
+                    if remaining == 0 {
+                        if failed {
+                            self.lock.lock()
+                            if self.generation == token { self.sending = false; self.awaitingKeyFrame = true; self.droppedFrames += Int64(self.queue.count + 1); self.queue.removeAll() }
+                            self.lock.unlock()
+                            self.onKeyFrameNeeded?()
+                            self.drainNext()
+                        } else { self.sendBatch(packets, offset: end, connection: connection, token: token) }
+                    }
+                })
+            }
+        }
+    }
     public func retransmitPacket(seq: Int) {
         guard let packet = packetizer.getPacket(seq: seq) else { return }
         lock.lock()
-        let activeConnection = connection
+        guard running, ready, retransmissionsInFlight < 64, let connection = connection else { lock.unlock(); return }
+        retransmissionsInFlight += 1
         lock.unlock()
-        
-        activeConnection?.send(content: packet, completion: .contentProcessed({ error in
-            if let error = error {
-                print("UdpStreamSender: Retransmit failed for seq \(seq): \(error)")
-            } else {
-                self.lock.lock()
-                self.bytesSent += Int64(packet.count)
-                self.lock.unlock()
-            }
-        }))
-    }
-
-    private func startLoop() {
-        let timer = DispatchSource.makeTimerSource(queue: streamQueue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(1))
-        
-        var windowStartMs = Date().timeIntervalSince1970 * 1000.0
-        var windowFrames = 0
-        var windowBytes: Int64 = 0
-        
-        timer.setEventHandler { [weak self] in
+        connection.send(content: packet, completion: .contentProcessed { [weak self] _ in
             guard let self = self else { return }
-            
-            var unit: QueuedAccessUnit? = nil
-            self.lock.lock()
-            if self.running && !self.queue.isEmpty {
-                unit = self.queue.removeFirst()
-            }
-            self.lock.unlock()
-            
-            if let unit = unit {
-                let packets = self.packetizer.packetize(accessUnit: unit.annexB, ptsUs: unit.ptsUs)
-                for packet in packets {
-                    self.lock.lock()
-                    let conn = self.connection
-                    self.lock.unlock()
-                    
-                    conn?.send(content: packet, completion: .contentProcessed({ error in
-                        if error == nil {
-                            self.lock.lock()
-                            self.packetsSent += 1
-                            self.bytesSent += Int64(packet.count)
-                            self.lock.unlock()
-                        }
-                    }))
-                    windowBytes += Int64(packet.count)
-                }
-                if !packets.isEmpty {
-                    self.lock.lock()
-                    self.framesSent += 1
-                    self.lock.unlock()
-                    windowFrames += 1
-                }
-            }
-            
-            let nowMs = Date().timeIntervalSince1970 * 1000.0
-            let elapsedMs = nowMs - windowStartMs
-            if elapsedMs >= 1000.0 {
-                self.lock.lock()
-                let totalFrames = self.framesSent
-                let totalPackets = self.packetsSent
-                let totalBytes = self.bytesSent
-                let totalDropped = self.droppedFrames
-                self.lock.unlock()
-                
-                let stats = Stats(
-                    framesSent: totalFrames,
-                    packetsSent: totalPackets,
-                    bytesSent: totalBytes,
-                    droppedFrames: totalDropped,
-                    fps: Int(Double(windowFrames) * 1000.0 / elapsedMs),
-                    mbps: Double(windowBytes) * 8.0 * 1000.0 / (elapsedMs * 1000000.0)
-                )
-                
-                windowStartMs = nowMs
-                windowFrames = 0
-                windowBytes = 0
-                
-                DispatchQueue.main.async {
-                    self.onStats?(stats)
-                }
-            }
-        }
-        
-        self.timer = timer
-        timer.resume()
+            self.lock.lock(); self.retransmissionsInFlight -= 1; self.lock.unlock()
+        })
+    }
+    private func reportIfDueLocked() {
+        let now = ProcessInfo.processInfo.systemUptime, elapsed = now - lastReport
+        guard elapsed >= 1 else { return }
+        let stats = Stats(framesSent: framesSent, packetsSent: packetsSent, bytesSent: bytesSent, droppedFrames: droppedFrames,
+                          fps: Int(Double(framesSent - reportFrames) / elapsed), mbps: Double(bytesSent - reportBytes) * 8 / elapsed / 1_000_000)
+        reportFrames = framesSent; reportBytes = bytesSent; lastReport = now
+        DispatchQueue.main.async { [weak self] in self?.onStats?(stats) }
     }
 }

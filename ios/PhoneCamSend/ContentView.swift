@@ -1,77 +1,97 @@
 import SwiftUI
+import AVFoundation
+import Network
 
 class ContentViewModel: ObservableObject, StreamControllerListener {
-    @Published var statusMessage: String = "Idle"
-    @Published var isRunning: Bool = false
-    
+    @Published var statusMessage = "Open PhoneCam Receiver on your computer."
+    @Published var isRunning = false
     private let controller = StreamController()
-    
-    init() {
-        controller.listener = self
+    private var requestGeneration = 0
+    init() { controller.listener = self }
+
+    private func withCamera(_ action: @escaping () -> Void) {
+        requestGeneration += 1
+        let token = requestGeneration
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self = self, self.requestGeneration == token else { return }
+                if granted { action(); self.isRunning = true }
+                else { self.statusMessage = "Enable camera permission in Settings to stream." }
+            }
+        }
     }
-    
+    func connect(to endpoint: NWEndpoint) {
+        withCamera { [weak self] in self?.controller.connect(to: endpoint) }
+    }
+    func connect(code: String) {
+        guard let address = ReceiverAddress.parse(code), let port = NWEndpoint.Port(rawValue: address.port) else {
+            statusMessage = "Check the PC code shown on your computer, or enter its IP address (optionally followed by :port)."
+            return
+        }
+        connect(to: .hostPort(host: .init(address.host), port: port))
+    }
     func toggleServer() {
-        if isRunning {
-            controller.stopControl()
-            isRunning = false
-        } else {
-            controller.startControl()
-            isRunning = true
-        }
+        if isRunning { stop() }
+        else { withCamera { [weak self] in self?.controller.startControl() } }
     }
-    
-    // MARK: - StreamControllerListener
+    func stop() {
+        requestGeneration += 1
+        controller.stopControl()
+        isRunning = false
+        statusMessage = "Disconnected. Your camera is off."
+    }
     func streamControllerDidUpdateStatus(_ controller: StreamController, status: String) {
-        DispatchQueue.main.async {
-            self.statusMessage = status
-        }
+        DispatchQueue.main.async { self.statusMessage = status }
     }
 }
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var viewModel = ContentViewModel()
-    
+    @StateObject private var browser = ReceiverBrowser()
+    @State private var code = ""
+    @State private var searching = false
     var body: some View {
-        VStack(spacing: 20) {
-            Text("PhoneCam 4K60 HEVC Sender")
-                .font(.title)
-                .bold()
-                .padding()
-            
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Status:")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("PhoneCam").font(.largeTitle).bold()
+                Text("Open PhoneCam Receiver on your computer, then find it below.")
+                Button("Find my computer") { searching = true; browser.start() }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                if searching {
+                    Text(browser.message).font(.footnote).foregroundColor(.secondary)
+                    ForEach(browser.computers) { computer in
+                        Button { viewModel.connect(to: computer.endpoint); browser.stop(); searching = false } label: {
+                            Label(computer.name, systemImage: "desktopcomputer").frame(maxWidth: .infinity, alignment: .leading)
+                        }.buttonStyle(.bordered)
+                    }
+                }
+                TextField("PC code or computer IP address", text: $code)
+                    .textFieldStyle(.roundedBorder).textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled().submitLabel(.go)
+                    .onSubmit { connectWithCode() }
+                Button("Connect with code") { connectWithCode() }.buttonStyle(.bordered)
                 Text(viewModel.statusMessage)
-                    .font(.body)
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.secondarySystemBackground))
-                    .cornerRadius(8)
-            }
-            .padding(.horizontal)
-            
-            Button(action: {
-                viewModel.toggleServer()
-            }) {
-                Text(viewModel.isRunning ? "Stop Control Server" : "Start Control Server")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(viewModel.isRunning ? Color.red : Color.blue)
-                    .cornerRadius(10)
-            }
-            .padding()
-            
-            Spacer()
+                    .padding().frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(.secondarySystemBackground)).cornerRadius(10)
+                if viewModel.isRunning {
+                    Button("Stop connection", role: .destructive) { viewModel.stop() }.buttonStyle(.bordered)
+                }
+                Text("Selecting a computer starts your camera. Streaming stops when you leave this app. Use your main home network; guest Wi-Fi may block connections.")
+                    .font(.footnote).foregroundColor(.secondary)
+                DisclosureGroup("Advanced connection options") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Button(viewModel.isRunning ? "Stop receiver access" : "Allow receiver access") { viewModel.toggleServer() }
+                        Text("Allows a receiver on this network to start your camera using the phone’s IP address. For manual TCP or UDP connections.")
+                            .font(.footnote).foregroundColor(.secondary)
+                    }.padding(.top)
+                }
+            }.padding(24)
         }
-        .padding()
+        .onChange(of: viewModel.isRunning) { running in UIApplication.shared.isIdleTimerDisabled = running }
+        .onChange(of: scenePhase) { phase in
+            if phase == .background { browser.stop(); searching = false; viewModel.stop() }
+        }
     }
-}
-
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
-    }
+    private func connectWithCode() { browser.stop(); searching = false; viewModel.connect(code: code) }
 }

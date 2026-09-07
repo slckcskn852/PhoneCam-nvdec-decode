@@ -20,7 +20,7 @@ struct RtpView {
 // Parses a 12-byte RTP header, skipping CSRC entries and any header
 // extension (X bit) and honoring the padding bit. V must be 2.
 bool parseRtp(const uint8_t* data, size_t len, RtpView& view) {
-  if (len < 12 || (data[0] >> 6) != 2) {
+  if (!data || len > 65535 || len < 12 || (data[0] >> 6) != 2) {
     return false;
   }
   const size_t csrcCount = data[0] & 0x0F;
@@ -52,7 +52,7 @@ bool parseRtp(const uint8_t* data, size_t len, RtpView& view) {
   size_t payloadLen = len - headerLen;
   if (hasPadding && payloadLen > 0) {
     const uint8_t padding = data[len - 1];
-    if (padding > payloadLen) {
+    if (padding == 0 || padding > payloadLen) {
       return false;
     }
     payloadLen -= padding;
@@ -126,7 +126,7 @@ void RtpHevcDepacketizer::feedPacket(const uint8_t* data, size_t len) {
     std::vector<uint16_t> missingSeqs;
     const auto nowTime = std::chrono::steady_clock::now();
     uint32_t giveUpUntil = nextReleaseSeq_;
-    for (uint32_t s = nextReleaseSeq_; s < ext; ++s) {
+    for (uint32_t s = nextReleaseSeq_; s < ext && s - nextReleaseSeq_ < gapTimeoutPackets_; ++s) {
       if (pending_.find(s) == pending_.end()) {
         auto it = nackSentTimes_.find(s);
         if (it == nackSentTimes_.end()) {
@@ -233,13 +233,15 @@ void RtpHevcDepacketizer::processPacket(const BufferedPacket& packet, bool conti
   // A newer RTP timestamp closes the previous access unit even when its
   // marker packet was lost.
   if (auActive_ && packet.timestamp != auTimestamp_) {
-    emitAccessUnit(true);
+    emitAccessUnit(false);
   }
   if (!auActive_) {
     auActive_ = true;
     auTimestamp_ = packet.timestamp;
     auStarted_ = std::chrono::steady_clock::now();
   }
+
+  if (!contiguous && haveLastReleased_) auDamaged_ = true;
 
   const uint8_t nalType = (packet.payload[0] >> 1) & 0x3F;
   if (nalType <= 47) {
@@ -252,7 +254,8 @@ void RtpHevcDepacketizer::processPacket(const BufferedPacket& packet, bool conti
       const size_t nalLen = (static_cast<size_t>(packet.payload[offset]) << 8) |
                             packet.payload[offset + 1];
       offset += 2;
-      if (offset + nalLen > packet.payload.size()) {
+      if (nalLen < 2 || offset + nalLen > packet.payload.size()) {
+        auDamaged_ = true;
         break;
       }
       appendNal(packet.payload.data() + offset, nalLen);
@@ -269,7 +272,8 @@ void RtpHevcDepacketizer::processPacket(const BufferedPacket& packet, bool conti
 }
 
 void RtpHevcDepacketizer::processFu(const std::vector<uint8_t>& payload, bool alreadyAborted) {
-  if (payload.size() < 3) {
+  if (payload.size() < 4) {
+    auDamaged_ = true;
     return;
   }
   const uint8_t fuHeader = payload[2];
@@ -287,6 +291,10 @@ void RtpHevcDepacketizer::processFu(const std::vector<uint8_t>& payload, bool al
     fuBuffer_.assign(payload.begin() + 3, payload.end());
     fuActive_ = true;
   } else if (fuActive_) {
+    if (fuBuffer_.size() + payload.size() - 3 > kMaxAccessUnitBytes - 6) {
+      abortFu();
+      return;
+    }
     fuBuffer_.insert(fuBuffer_.end(), payload.begin() + 3, payload.end());
   } else {
     // Middle/end fragment with no live start fragment: this FU sequence is
@@ -300,6 +308,10 @@ void RtpHevcDepacketizer::processFu(const std::vector<uint8_t>& payload, bool al
   }
 
   if (end && fuActive_) {
+    if (auBuffer_.size() + fuBuffer_.size() + 6 > kMaxAccessUnitBytes) {
+      abortFu();
+      return;
+    }
     auBuffer_.insert(auBuffer_.end(), std::begin(kStartCode), std::end(kStartCode));
     auBuffer_.push_back(fuHeader_[0]);
     auBuffer_.push_back(fuHeader_[1]);
@@ -314,12 +326,17 @@ void RtpHevcDepacketizer::abortFu() {
     return;
   }
   fuActive_ = false;
+  auDamaged_ = true;
   fuBuffer_.clear();
   std::lock_guard<std::mutex> lock(statsMutex_);
   ++stats_.fusDropped;
 }
 
 void RtpHevcDepacketizer::appendNal(const uint8_t* data, size_t len) {
+  if (len < 2 || len > kMaxAccessUnitBytes - 4 || auBuffer_.size() > kMaxAccessUnitBytes - 4 - len) {
+    auDamaged_ = true;
+    return;
+  }
   auBuffer_.insert(auBuffer_.end(), std::begin(kStartCode), std::end(kStartCode));
   auBuffer_.insert(auBuffer_.end(), data, data + len);
 }
@@ -332,13 +349,14 @@ void RtpHevcDepacketizer::emitAccessUnit(bool complete) {
     // An FU spanning an access-unit boundary can never complete.
     abortFu();
   }
-  if (!auBuffer_.empty() && callback_) {
-    callback_(auBuffer_.data(), auBuffer_.size(), auTimestamp_, complete);
+  if ((!auBuffer_.empty() || auDamaged_) && callback_) {
+    callback_(auBuffer_.data(), auBuffer_.size(), auTimestamp_, complete && !auDamaged_);
     std::lock_guard<std::mutex> lock(statsMutex_);
     ++stats_.framesEmitted;
   }
   auBuffer_.clear();
   auActive_ = false;
+  auDamaged_ = false;
 }
 
 void RtpHevcDepacketizer::flushStaleAccessUnit() {
@@ -368,6 +386,15 @@ void RtpHevcDepacketizer::flushAll() {
   emitAccessUnit(false);
   nackSentTimes_.clear();
   nackRetries_.clear();
+}
+
+void RtpHevcDepacketizer::reset() {
+  pending_.clear(); nackSentTimes_.clear(); nackRetries_.clear();
+  auBuffer_.clear(); fuBuffer_.clear();
+  haveRange_ = haveLastReleased_ = auActive_ = auDamaged_ = fuActive_ = haveTransit_ = false;
+  nextReleaseSeq_ = highestSeq_ = lastReleasedSeq_ = 0;
+  std::lock_guard<std::mutex> lock(statsMutex_);
+  stats_ = {};
 }
 
 RtpHevcDepacketizer::Stats RtpHevcDepacketizer::statsSnapshotAndReset() {

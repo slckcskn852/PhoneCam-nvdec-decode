@@ -199,3 +199,37 @@ jobs:
         with:
           name: phonecam-windows-receiver-softcam
           path: build/windows-softcam-receiver/Release/phonecam-receiver.exe
+
+  pipeline-sanitizers:
+    name: Pipeline memory and lifecycle sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ASan and UBSan core tests
+        run: >-
+          cmake -S desktop -B build/sanitizers -DPHONECAM_TARGET=core
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - run: cmake --build build/sanitizers --parallel 2
+      - run: ctest --test-dir build/sanitizers --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+
+  ios:
+    name: iOS simulator regressions
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test sender
+        run: |
+          device_id=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; print(next(d["udid"] for ds in json.load(sys.stdin)["devices"].values() for d in ds if d["name"].startswith("iPhone")))')
+          xcodebuild -project ios/PhoneCamSend.xcodeproj -scheme PhoneCamSend \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO -resultBundlePath build/ios-tests.xcresult test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phonecam-ios-test-results
+          path: build/ios-tests.xcresult

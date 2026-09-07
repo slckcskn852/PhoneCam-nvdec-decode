@@ -16,10 +16,14 @@ class RtpHevcPacketizer(
     initialSequenceNumber: Int = 0x1F00
 ) {
     private var sequenceNumber = initialSequenceNumber and 0xFFFF
-    private val history = arrayOfNulls<ByteArray>(256)
+    private val history = arrayOfNulls<ByteArray>(2048)
 
+    init { require(mtu in 16..65507) { "MTU must hold an RTP/FU header and payload" } }
+
+    @Synchronized
     fun getPacket(seq: Int): ByteArray? {
-        val packet = history[seq % 256] ?: return null
+        if (seq !in 0..65535) return null
+        val packet = history[seq % history.size] ?: return null
         val packetSeq = ((packet[2].toInt() and 0xFF) shl 8) or (packet[3].toInt() and 0xFF)
         return if (packetSeq == seq) packet else null
     }
@@ -29,7 +33,9 @@ class RtpHevcPacketizer(
      * when the access unit carries no sendable NAL units (e.g. only AUDs).
      * Never throws on malformed input.
      */
+    @Synchronized
     fun packetize(accessUnit: ByteArray, ptsUs: Long): List<ByteArray> {
+        if (accessUnit.size > 8 * 1024 * 1024) return emptyList()
         val timestamp = ptsUs * RTP_CLOCK_HZ / 1_000_000L
         val nals = splitAnnexB(accessUnit).filter { nal ->
             nal.size >= HEVC_NAL_HEADER_SIZE && nalType(nal) != NAL_TYPE_AUD
@@ -89,7 +95,7 @@ class RtpHevcPacketizer(
         packet[1] = PAYLOAD_TYPE.toByte() // marker applied later on last packet
         packet[2] = (sequenceNumber shr 8).toByte()
         packet[3] = (sequenceNumber and 0xFF).toByte()
-        history[sequenceNumber % 256] = packet
+        history[sequenceNumber % history.size] = packet
         sequenceNumber = (sequenceNumber + 1) and 0xFFFF
         packet[4] = (timestamp shr 24).toByte()
         packet[5] = (timestamp shr 16).toByte()

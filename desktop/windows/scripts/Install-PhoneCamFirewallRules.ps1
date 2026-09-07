@@ -7,8 +7,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$discoveryRuleName = "$RulePrefix Receiver Discovery UDP"
-$rtspRuleName = "$RulePrefix Receiver RTSP TCP Out"
+$rules = @(
+  @{ Name = "$RulePrefix Receiver Discovery UDP"; Direction = "Inbound"; Protocol = "UDP"; LocalPort = 47821 },
+  @{ Name = "$RulePrefix Receiver RTSP TCP Out"; Direction = "Outbound"; Protocol = "TCP"; RemotePort = 8554 },
+  @{ Name = "$RulePrefix Receiver Phone TCP In"; Direction = "Inbound"; Protocol = "TCP"; LocalPort = 47823 },
+  @{ Name = "$RulePrefix Receiver Media UDP In"; Direction = "Inbound"; Protocol = "UDP"; LocalPort = 5004 },
+  @{ Name = "$RulePrefix Receiver Control TCP Out"; Direction = "Outbound"; Protocol = "TCP"; RemotePort = 47822 },
+  @{ Name = "$RulePrefix Receiver Bonjour UDP In"; Direction = "Inbound"; Protocol = "UDP"; LocalPort = 5353 },
+  @{ Name = "$RulePrefix Receiver Bonjour UDP Out"; Direction = "Outbound"; Protocol = "UDP"; RemotePort = 5353 }
+)
 
 function Resolve-ExistingFile {
   param([string]$Path)
@@ -47,38 +54,17 @@ if (-not (Test-IsAdministrator)) {
 Assert-NetSecurityAvailable
 
 if ($Remove) {
-  Remove-RuleIfPresent -Name $discoveryRuleName
-  Remove-RuleIfPresent -Name $rtspRuleName
+  foreach ($rule in $rules) { Remove-RuleIfPresent -Name $rule.Name }
   Write-Host "Removed PhoneCam firewall rules if present."
   exit 0
 }
 
 $receiverPath = Resolve-ExistingFile $Receiver
-
-Remove-RuleIfPresent -Name $discoveryRuleName
-Remove-RuleIfPresent -Name $rtspRuleName
-
-New-NetFirewallRule `
-  -Name $discoveryRuleName `
-  -DisplayName $discoveryRuleName `
-  -Direction Inbound `
-  -Action Allow `
-  -Program $receiverPath `
-  -Protocol UDP `
-  -LocalPort 47821 `
-  -Profile Private | Out-Null
-
-New-NetFirewallRule `
-  -Name $rtspRuleName `
-  -DisplayName $rtspRuleName `
-  -Direction Outbound `
-  -Action Allow `
-  -Program $receiverPath `
-  -Protocol TCP `
-  -RemotePort 8554 `
-  -Profile Private | Out-Null
-
+foreach ($rule in $rules) {
+  Remove-RuleIfPresent -Name $rule.Name
+  New-NetFirewallRule @rule -DisplayName $rule.Name -Action Allow -Program $receiverPath -Profile Private | Out-Null
+}
 Write-Host "Installed PhoneCam firewall rules for private networks."
 Write-Host "Receiver: $receiverPath"
-Write-Host "Discovery: inbound UDP 47821"
-Write-Host "RTSP: outbound TCP 8554"
+Write-Host "Phone connection: inbound TCP 47823. Discovery: mDNS UDP 5353 and legacy UDP 47821."
+Write-Host "Advanced: inbound UDP 5004, outbound TCP 47822 and RTSP TCP 8554."

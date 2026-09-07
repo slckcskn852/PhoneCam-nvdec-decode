@@ -309,4 +309,30 @@ class RtpHevcPacketizerTest {
     private fun annexB(vararg nals: ByteArray): ByteArray {
         return nals.fold(ByteArray(0)) { acc, nal -> acc + byteArrayOf(0, 0, 1) + nal }
     }
+    @org.junit.Test
+    fun invalidNackSequencesAreIgnored() {
+        val packetizer = RtpHevcPacketizer()
+        org.junit.Assert.assertNull(packetizer.getPacket(-1))
+        org.junit.Assert.assertNull(packetizer.getPacket(65536))
+    }
+
+    @org.junit.Test(expected = IllegalArgumentException::class)
+    fun impossibleMtuIsRejectedInsteadOfLoopingForever() {
+        RtpHevcPacketizer(mtu = 15)
+    }
+
+    @org.junit.Test
+    fun allFragmentHistoryContainsFinalPayloadAndMarker() {
+        val packetizer = RtpHevcPacketizer()
+        val au = ByteArray(9000) { 7 }.also {
+            it[0] = 0; it[1] = 0; it[2] = 1; it[3] = 0x26; it[4] = 1
+        }
+        val packets = packetizer.packetize(au, 1_000_000)
+        org.junit.Assert.assertTrue(packets.size > 1)
+        for (packet in packets) {
+            val seq = ((packet[2].toInt() and 255) shl 8) or (packet[3].toInt() and 255)
+            org.junit.Assert.assertArrayEquals(packet, packetizer.getPacket(seq))
+        }
+    }
+
 }

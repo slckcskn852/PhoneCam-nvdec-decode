@@ -16,21 +16,28 @@ public class RtpSwiftPacketizer {
     public private(set) var sequenceNumber: UInt16
     public let mtu: Int
     public let ssrc: UInt32
-    private var history = [Data?](repeating: nil, count: 256)
+    private var history = [Data?](repeating: nil, count: 2048)
+
+    private let lock = NSLock()
 
     public init(mtu: Int = defaultMtu, ssrc: UInt32 = defaultSsrc, initialSequenceNumber: UInt16 = 0x1F00) {
+        precondition((16...65507).contains(mtu), "MTU must hold an RTP/FU header and payload")
         self.mtu = mtu
         self.ssrc = ssrc
         self.sequenceNumber = initialSequenceNumber
     }
 
     public func getPacket(seq: Int) -> Data? {
-        guard let packet = history[seq % 256] else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        guard (0...65535).contains(seq) else { return nil }
+        guard let packet = history[seq % history.count] else { return nil }
         let packetSeq = (Int(packet[2]) << 8) | Int(packet[3])
         return packetSeq == seq ? packet : nil
     }
 
     public func packetize(accessUnit: Data, ptsUs: Int64) -> [Data] {
+        lock.lock(); defer { lock.unlock() }
+        guard accessUnit.count <= 8 * 1024 * 1024 else { return [] }
         let timestamp = UInt32((ptsUs * Self.rtpClockHz / 1_000_000) & 0xFFFFFFFF)
         let nals = Self.splitAnnexB(data: accessUnit).filter { nal in
             nal.count >= Self.hevcNalHeaderSize && Self.nalType(nal: nal) != Self.nalTypeAud
@@ -51,8 +58,11 @@ public class RtpSwiftPacketizer {
             last[1] |= 0x80 // Set Marker (M) bit to 1
             packets[packets.count - 1] = last
             
-            let lastSeq = (sequenceNumber &- 1) & 0xFFFF
-            history[Int(lastSeq) % 256] = last
+            // Data is a value type: publish after the payload and marker are final.
+            for packet in packets {
+                let sequence = (Int(packet[2]) << 8) | Int(packet[3])
+                history[sequence % history.count] = packet
+            }
         }
 
         return packets
@@ -102,7 +112,6 @@ public class RtpSwiftPacketizer {
         packet[2] = UInt8((sequenceNumber >> 8) & 0xFF)
         packet[3] = UInt8(sequenceNumber & 0xFF)
         
-        history[Int(sequenceNumber) % 256] = packet
         sequenceNumber = sequenceNumber &+ 1
         
         packet[4] = UInt8((timestamp >> 24) & 0xFF)

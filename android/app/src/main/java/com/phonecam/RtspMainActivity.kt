@@ -29,6 +29,9 @@ import android.widget.EditText
 import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -83,7 +86,14 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
     private lateinit var stream4kStatsText: TextView
     private lateinit var stream4kController: Stream4kController
     private var stream4kRunning = false
+    private lateinit var streamModeSpinner: android.widget.Spinner
+    private lateinit var remoteCameraControl: android.widget.CheckBox
+    private var streamModes: List<com.phonecam.stream4k.Ladder> = emptyList()
     private var lastReceiverIp: String? = null
+    private var receiverDiscovery: ReceiverDiscovery? = null
+    private var computerDialog: androidx.appcompat.app.AlertDialog? = null
+    private var pendingComputer: ReceiverAddress.Target? = null
+    private var easyConnecting = false
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private var blackoutRunnable: Runnable? = null
@@ -130,15 +140,37 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            statusText.text = "Ready. Start the camera server. Windows can use the URL or --auto-discover."
+            statusText.text = "Camera ready."
+            pendingComputer?.let { connectComputer(it) }
         } else {
             statusText.text = "Camera permission is required."
+            findViewById<TextView>(R.id.easyConnectionStatus).text = "Allow camera access to connect."
+            pendingComputer = null
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_rtsp)
+        val content = findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0)
+        ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (rtspServerStream.isStreaming) {
+                    stopStreaming()
+                    showConnectionPage()
+                } else {
+                    savePreferences()
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        })
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences("phonecam_prefs", Context.MODE_PRIVATE)
@@ -169,6 +201,8 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
         stream4kTargetPortEdit = findViewById(R.id.stream4kTargetPortEdit)
         stream4kToggleBtn = findViewById(R.id.stream4kToggleBtn)
         stream4kStatsText = findViewById(R.id.stream4kStatsText)
+        streamModeSpinner = findViewById(R.id.streamModeSpinner)
+        remoteCameraControl = findViewById(R.id.remoteCameraControl)
 
         rtspServerStream = createRtspServerStream()
         displayManager = getSystemService(DisplayManager::class.java)
@@ -177,6 +211,13 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
         configureBitrateAdapter()
         setupControls()
         setupStream4kControls()
+        setupEasyConnection()
+        // Launch directly into the legacy panel for the existing RTSP QA helpers.
+        if (intent.getBooleanExtra("phonecam_advanced", false)) {
+            findViewById<View>(R.id.advancedConnectionPanel).visibility = View.VISIBLE
+            val advanced = findViewById<View>(R.id.advancedConnectionPanel)
+            advanced.post { (connectionPage.parent as? android.widget.ScrollView)?.smoothScrollTo(0, advanced.top) }
+        }
         setupPreviewSurface()
         updateRtspUrl()
         updatePairingCode()
@@ -184,7 +225,8 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
         blackoutOverlay.setOnClickListener { cancelBlackout() }
 
         if (hasCameraPermission()) {
-            statusText.text = "Ready. Start the camera server. Windows can use the URL or --auto-discover."
+            statusText.text = "Camera ready."
+            pendingComputer?.let { connectComputer(it) }
         } else {
             statusText.text = "Camera permission required."
             permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -264,6 +306,63 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
         }
     }
 
+    private fun setupEasyConnection() {
+        findViewById<Button>(R.id.advancedConnectionBtn).setOnClickListener {
+            val panel = findViewById<View>(R.id.advancedConnectionPanel)
+            panel.visibility = if (panel.visibility == View.GONE) View.VISIBLE else View.GONE
+        }
+        findViewById<Button>(R.id.findComputerBtn).setOnClickListener {
+            receiverDiscovery?.stop()
+            computerDialog?.dismiss()
+            var computers = emptyList<ReceiverDiscovery.Computer>()
+            val adapter = android.widget.ArrayAdapter<String>(this, android.R.layout.simple_list_item_1)
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Finding computers…")
+                .setAdapter(adapter) { _, index ->
+                    computers.getOrNull(index)?.let { connectComputer(ReceiverAddress.Target(it.host, it.port)) }
+                }
+                .setNegativeButton("Cancel", null).create()
+            computerDialog = dialog
+            val discovery = ReceiverDiscovery(applicationContext, { found ->
+                computers = found
+                adapter.clear(); adapter.addAll(found.map { it.name }); adapter.notifyDataSetChanged()
+                dialog.setTitle(if (found.isEmpty()) "Finding computers…" else "Choose your computer")
+            }, { message -> findViewById<TextView>(R.id.easyConnectionStatus).text = message })
+            receiverDiscovery = discovery
+            dialog.setOnDismissListener { discovery.stop() }
+            dialog.show()
+            findViewById<TextView>(R.id.easyConnectionStatus).text = "Keep the PC receiver open. If it does not appear, enter its PC code. On guest Wi-Fi, switch to your main home network."
+            discovery.start()
+        }
+        findViewById<Button>(R.id.connectComputerBtn).setOnClickListener {
+            val target = ReceiverAddress.parse(findViewById<EditText>(R.id.receiverCodeEdit).text.toString())
+            if (target == null) findViewById<TextView>(R.id.easyConnectionStatus).text = "Enter the PC code shown on your computer, or its IP address (optionally followed by :port)."
+            else connectComputer(target)
+        }
+        findViewById<Button>(R.id.stopComputerBtn).setOnClickListener {
+            easyConnecting = false; pendingComputer = null
+            stream4kController.stop()
+            it.visibility = View.GONE
+            findViewById<TextView>(R.id.easyConnectionStatus).text = "Disconnected. Your camera is off."
+        }
+    }
+
+    private fun connectComputer(target: ReceiverAddress.Target) {
+        if (!hasCameraPermission()) {
+            pendingComputer = target
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+            return
+        }
+        pendingComputer = null
+        receiverDiscovery?.stop()
+        stopStreaming()
+        remoteCameraControl.isChecked = false
+        easyConnecting = true
+        findViewById<Button>(R.id.stopComputerBtn).visibility = View.VISIBLE
+        findViewById<TextView>(R.id.easyConnectionStatus).text = "Connecting to ${target.host}…"
+        stream4kController.connectToReceiver(target.host, target.port)
+    }
+
     private fun setupStream4kControls() {
         stream4kController = Stream4kController(applicationContext).apply {
             listener = object : Stream4kController.Listener {
@@ -272,14 +371,27 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
                         if (::stream4kStatsText.isInitialized) {
                             stream4kStatsText.text = message
                         }
+                        if (easyConnecting) findViewById<TextView>(R.id.easyConnectionStatus).text = message
                         stream4kRunning = isStreaming()
                         updateStream4kToggleButton()
                     }
                 }
             }
-            startControlListener()
         }
         prefillStream4kTarget()
+        remoteCameraControl.setOnCheckedChangeListener { _, enabled ->
+            if (enabled && hasCameraPermission()) {
+                stopStreaming()
+                stream4kController.startControlListener()
+                stream4kStatsText.text = "Receiver control enabled on this network while this screen is open."
+            } else {
+                stream4kController.stop()
+                if (enabled) {
+                    remoteCameraControl.isChecked = false
+                    permissionLauncher.launch(Manifest.permission.CAMERA)
+                }
+            }
+        }
 
         stream4kToggleBtn.setOnClickListener {
             if (stream4kRunning || stream4kController.isStreaming()) {
@@ -302,9 +414,16 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
             }
             val port = stream4kTargetPortEdit.text.toString().toIntOrNull()
                 ?: Stream4kController.DEFAULT_STREAM_PORT
-            stream4kStatsText.text = "4K UDP starting..."
+            if (port !in 1..65535) {
+                stream4kStatsText.text = "Use a port from 1 to 65535."
+                return@setOnClickListener
+            }
+            val selectedMode = streamModes.getOrNull(streamModeSpinner.selectedItemPosition)
+            stopStreaming()
+            remoteCameraControl.isChecked = true
+            stream4kStatsText.text = "Camera starting..."
             Thread({
-                val ladder = stream4kController.probeLadder()
+                val ladder = selectedMode ?: stream4kController.probeLadder()
                 if (ladder == null) {
                     runOnUiThread {
                         stream4kStatsText.text = "4K UDP unsupported on this device."
@@ -329,7 +448,8 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
     }
 
     private fun updateStream4kToggleButton() {
-        stream4kToggleBtn.text = if (stream4kRunning) "Stop 4K60 UDP" else "Start 4K60 UDP"
+        stream4kToggleBtn.text = if (stream4kRunning) "Stop camera stream" else "Start camera stream"
+        streamModeSpinner.isEnabled = !stream4kRunning
     }
 
     private fun prefillStream4kTarget() {
@@ -345,9 +465,15 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
     private fun refreshStream4kCapabilityReport() {
         Thread({
             val report = stream4kController.capabilityReport()
+            val modes = stream4kController.availableLadders()
             runOnUiThread {
                 if (::stream4kCapabilityText.isInitialized) {
                     stream4kCapabilityText.text = report
+                    if (streamModes != modes) {
+                        streamModes = modes
+                        streamModeSpinner.adapter = android.widget.ArrayAdapter(
+                            this, android.R.layout.simple_spinner_dropdown_item, modes.map { it.summary })
+                    }
                 }
             }
         }, "PhoneCam4kProbe").apply {
@@ -1157,16 +1283,24 @@ class RtspMainActivity : AppCompatActivity(), ConnectChecker {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (rtspServerStream.isStreaming) {
-            stopStreaming()
-            showConnectionPage()
-        } else {
-            savePreferences()
-            @Suppress("DEPRECATION")
-            super.onBackPressed()
+    override fun onStart() {
+        super.onStart()
+        if (::stream4kController.isInitialized) stream4kController.setForeground(true)
+    }
+
+    override fun onStop() {
+        receiverDiscovery?.stop(); computerDialog?.dismiss()
+        pendingComputer = null; easyConnecting = false
+        findViewById<Button>(R.id.stopComputerBtn).visibility = View.GONE
+        findViewById<TextView>(R.id.easyConnectionStatus).text = "Disconnected. Find your computer to reconnect."
+        if (::stream4kController.isInitialized) {
+            stream4kController.setForeground(false)
+            remoteCameraControl.isChecked = false
+            stream4kRunning = false
+            updateStream4kToggleButton()
         }
+        if (::rtspServerStream.isInitialized) stopStreaming()
+        super.onStop()
     }
 
     override fun onPause() {

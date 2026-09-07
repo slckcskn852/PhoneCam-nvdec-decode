@@ -24,8 +24,16 @@ open class Stream4kController(context: Context) {
     }
 
     var listener: Listener? = null
+    @Volatile private var foreground = false
+
+    @Synchronized
+    fun setForeground(active: Boolean) {
+        foreground = active
+        if (!active) stop()
+    }
 
     private val appContext = context.applicationContext
+    private val rtpPacketizer = RtpHevcPacketizer()
     @Volatile internal var probe: DeviceCapabilitiesSource = AndroidCapabilityProbe(appContext)
 
     @Volatile private var persistentSurface: Surface? = null
@@ -40,6 +48,7 @@ open class Stream4kController(context: Context) {
     @Volatile var consecutiveGoodReports = 0
         internal set
     @Volatile private var controlRunning = false
+    @Volatile private var controlGeneration = 0L
     private var controlThread: Thread? = null
     private var controlSocket: DatagramSocket? = null
     @Volatile var lastPeerAddress: InetAddress? = null
@@ -55,14 +64,8 @@ open class Stream4kController(context: Context) {
     @Volatile private var tcpSender: TcpStreamSender? = null
     private var tcpControlThread: Thread? = null
 
-    fun probeLadder(): Ladder? {
-        val p = probe
-        return if (p is AndroidCapabilityProbe) {
-            p.probe()
-        } else {
-            CapabilityProbe.chooseLadder(p.supportedCombos(), p.hasHevcEncoder(), p.normalSessionCombos())
-        }
-    }
+    fun availableLadders(): List<Ladder> = probe.availableLadders()
+    fun probeLadder(): Ladder? = availableLadders().firstOrNull()
 
     fun capabilityReport(): String {
         val p = probe
@@ -75,15 +78,21 @@ open class Stream4kController(context: Context) {
 
     @Synchronized
     open fun start(ladder: Ladder, targetIp: String, targetPort: Int): Boolean {
+        if (!foreground || appContext.checkSelfPermission(android.Manifest.permission.CAMERA) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED) return false
         stopStreaming()
         return try {
             val surface = MediaCodec.createPersistentInputSurface()
+            persistentSurface = surface
             val hevcEncoder = HevcEncoder()
+            encoder = hevcEncoder
             val activeTcpSender = tcpSender
             val udpSender = if (activeTcpSender == null) {
                 UdpStreamSender(
                     targetIp = targetIp,
                     targetPort = targetPort,
+                    packetizer = rtpPacketizer,
+                    onKeyFrameNeeded = { hevcEncoder.requestKeyFrame() },
                     onStats = { stats ->
                         listener?.onStatus(
                             "4K UDP ${ladder.width}x${ladder.height}@${ladder.fps}: " +
@@ -93,16 +102,15 @@ open class Stream4kController(context: Context) {
                     }
                 )
             } else null
+            sender = udpSender
 
             hevcEncoder.callback = object : HevcEncoder.Callback {
-                private val packetizer = RtpHevcPacketizer()
+                private val packetizer = rtpPacketizer
 
                 override fun onAccessUnit(annexB: ByteArray, ptsUs: Long, isKeyFrame: Boolean) {
                     if (activeTcpSender != null) {
                         val packets = packetizer.packetize(annexB, ptsUs)
-                        for (packet in packets) {
-                            activeTcpSender.sendFrame(2.toByte(), packet)
-                        }
+                        activeTcpSender.sendAccessUnit(packets)
                     } else {
                         udpSender?.onAccessUnit(annexB, ptsUs, isKeyFrame)
                     }
@@ -111,6 +119,9 @@ open class Stream4kController(context: Context) {
                 override fun onError(message: String) {
                     Log.e(TAG, message)
                     listener?.onStatus("4K encoder error: $message")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        synchronized(this@Stream4kController) { if (encoder === hevcEncoder) stopStreaming() }
+                    }
                 }
             }
             hevcEncoder.configure(
@@ -118,7 +129,8 @@ open class Stream4kController(context: Context) {
                 height = ladder.height,
                 bitrateBps = ladder.bitrateBps,
                 fps = ladder.fps,
-                persistentInputSurface = surface
+                persistentInputSurface = surface,
+                encoderName = ladder.encoderName
             )
             val cameraPipeline = Camera2Pipeline(appContext)
             cameraPipeline.stateCallback = object : Camera2Pipeline.StateCallback {
@@ -132,6 +144,9 @@ open class Stream4kController(context: Context) {
 
                 override fun onError(message: String) {
                     listener?.onStatus("4K camera error: $message")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        synchronized(this@Stream4kController) { if (camera === cameraPipeline) stopStreaming() }
+                    }
                 }
             }
 
@@ -227,21 +242,28 @@ open class Stream4kController(context: Context) {
 
     @Synchronized
     fun startControlListener() {
+        if (!foreground) return
         if (controlRunning) return
-        controlRunning = true
-        controlThread = Thread({ controlLoop() }, "PhoneCam4kControl").apply {
-            isDaemon = true
-            start()
-        }
-        tcpControlThread = Thread({ tcpControlLoop() }, "PhoneCam4kTcpControl").apply {
-            isDaemon = true
-            start()
+        try {
+            // Bind before publishing worker threads so stop cannot miss a late socket.
+            val udp = DatagramSocket(CONTROL_PORT)
+            controlSocket = udp
+            val tcp = java.net.ServerSocket(CONTROL_PORT)
+            tcpServerSocket = tcp
+            controlRunning = true
+            val token = ++controlGeneration
+            controlThread = Thread({ controlLoop(udp, token) }, "PhoneCam4kControl").apply { isDaemon = true; start() }
+            tcpControlThread = Thread({ tcpControlLoop(tcp, token) }, "PhoneCam4kTcpControl").apply { isDaemon = true; start() }
+        } catch (e: Exception) {
+            stopControlListener()
+            listener?.onStatus("Receiver access failed: ${e.message}")
         }
     }
 
     @Synchronized
     fun stopControlListener() {
         controlRunning = false
+        controlGeneration++
         try {
             controlSocket?.close()
         } catch (e: Exception) {
@@ -262,52 +284,83 @@ open class Stream4kController(context: Context) {
         tcpClientSocket = null
         tcpSender?.stop()
         tcpSender = null
-        controlThread?.join(500)
         controlThread = null
-        tcpControlThread?.join(500)
+        tcpControlThread?.interrupt()
         tcpControlThread = null
     }
 
-    private fun tcpControlLoop() {
-        val serverSocket = try {
-            java.net.ServerSocket(CONTROL_PORT)
-        } catch (e: Exception) {
-            Log.e(TAG, "TCP control listener bind failed on $CONTROL_PORT", e)
-            return
+    fun connectToReceiver(host: String, port: Int = 47823) {
+        if (port !in 1..65535 || host.isBlank()) return
+        synchronized(this) {
+            if (!foreground) return
+            stop()
+            controlRunning = true
+            val token = ++controlGeneration
+            tcpControlThread = Thread({
+                var retry = 0
+                while (controlRunning && controlGeneration == token) {
+                    val client = java.net.Socket()
+                    synchronized(this) {
+                        if (!controlRunning || controlGeneration != token) { client.close(); return@Thread }
+                        tcpClientSocket = client
+                    }
+                    try {
+                        listener?.onStatus(if (retry == 0) "Connecting to computer…" else "Connection lost. Reconnecting…")
+                        client.connect(java.net.InetSocketAddress(host, port), 3000)
+                        client.tcpNoDelay = true
+                        client.getOutputStream().write("PHONECAM/2\n".toByteArray(StandardCharsets.US_ASCII))
+                        handleTcpClient(client, token)
+                    } catch (_: Exception) {
+                        if (controlRunning && controlGeneration == token)
+                            listener?.onStatus("Computer unreachable. Keep the receiver open, allow its home-network access, or check the PC code.")
+                    } finally { try { client.close() } catch (_: Exception) {} }
+                    retry++
+                    if (!controlRunning || controlGeneration != token) break
+                    try { Thread.sleep((retry.coerceAtMost(3) * 1000).toLong()) } catch (_: InterruptedException) { break }
+                }
+            }, "PhoneCamComputerConnection").apply { isDaemon = true; start() }
         }
-        tcpServerSocket = serverSocket
-        while (controlRunning) {
-            val client = try {
-                serverSocket.accept()
-            } catch (e: java.io.IOException) {
-                break
-            }
-            tcpClientSocket = client
+    }
+
+    private fun tcpControlLoop(serverSocket: java.net.ServerSocket, token: Long) {
+        while (controlRunning && controlGeneration == token) {
+            val client = try { serverSocket.accept() } catch (_: java.io.IOException) { break }
+            handleTcpClient(client, token)
+        }
+    }
+
+    private fun handleTcpClient(client: java.net.Socket, token: Long) {
+        val outSender = try { synchronized(this) {
+                if (!controlRunning || controlGeneration != token || isStreaming()) {
+                    client.close()
+                    null
+                } else {
+                    tcpClientSocket = client
+                    lastPeerAddress = client.inetAddress
+                    lastPeerPort = client.port
+                    TcpStreamSender(client) { stats ->
+                        listener?.onStatus("TCP: ${stats.fps} fps, ${String.format(java.util.Locale.US, "%.1f", stats.mbps)} Mbps, ${stats.packetsSent} pkts")
+                    }.also { tcpSender = it; it.start() }
+                }
+            } } catch (e: Exception) {
+                try { client.close() } catch (_: Exception) {}
+                null
+            } ?: return
             try {
                 val input = java.io.DataInputStream(client.getInputStream())
-                val outSender = TcpStreamSender(client) { stats ->
-                    listener?.onStatus(
-                        "4K TCP ${activeLadder?.width}x${activeLadder?.height}: " +
-                            "${stats.fps} fps, ${String.format(java.util.Locale.US, "%.1f", stats.mbps)} Mbps, " +
-                            "${stats.packetsSent} pkts"
-                    )
-                }
-                tcpSender = outSender
-                outSender.start()
-                
-                lastPeerAddress = client.inetAddress
-                lastPeerPort = client.port
-                
-                while (controlRunning) {
+                while (controlRunning && controlGeneration == token) {
                     val channel = input.readByte()
                     val reserved = input.readByte()
                     val length = input.readInt()
+                    require(channel == 1.toByte() && reserved == 0.toByte() && length in 1..65535) { "Invalid control record" }
                     val payload = ByteArray(length)
                     input.readFully(payload)
                     
                     if (channel == 1.toByte()) {
                         val text = String(payload, StandardCharsets.UTF_8).trim()
-                        val reply = handleControlCommand(text, client.inetAddress, client.port)
+                        val reply = synchronized(this) {
+                            if (controlRunning && controlGeneration == token) handleControlCommand(text, client.inetAddress, client.port) else null
+                        }
                         if (reply != null) {
                             val replyBytes = reply.toByteArray(StandardCharsets.UTF_8)
                             outSender.sendFrame(1.toByte(), replyBytes)
@@ -317,25 +370,21 @@ open class Stream4kController(context: Context) {
             } catch (e: Exception) {
                 if (controlRunning) Log.w(TAG, "TCP client error: ${e.message}")
             } finally {
-                tcpSender?.stop()
-                tcpSender = null
+                synchronized(this) {
+                    if (controlGeneration == token && tcpClientSocket === client) {
+                        stopStreaming()
+                        tcpSender = null
+                        tcpClientSocket = null
+                    }
+                }
+                outSender.stop()
                 try { client.close() } catch (e: Exception) {}
-                tcpClientSocket = null
             }
-        }
     }
 
-    private fun controlLoop() {
-        val socket = try {
-            DatagramSocket(CONTROL_PORT)
-        } catch (e: Exception) {
-            Log.e(TAG, "Control listener bind failed on $CONTROL_PORT", e)
-            controlRunning = false
-            return
-        }
-        controlSocket = socket
-        val buffer = ByteArray(1024)
-        while (controlRunning) {
+    private fun controlLoop(socket: DatagramSocket, token: Long) {
+        val buffer = ByteArray(65535)
+        while (controlRunning && controlGeneration == token) {
             val packet = DatagramPacket(buffer, buffer.size)
             try {
                 socket.receive(packet)
@@ -343,9 +392,10 @@ open class Stream4kController(context: Context) {
                 if (controlRunning) Log.w(TAG, "Control receive failed", e)
                 break
             }
-            lastPeerAddress = packet.address
             val text = String(packet.data, packet.offset, packet.length, StandardCharsets.UTF_8).trim()
-            val reply = handleControlCommand(text, packet.address, packet.port)
+            val reply = synchronized(this) {
+                if (controlRunning && controlGeneration == token && tcpSender == null) handleControlCommand(text, packet.address, packet.port) else null
+            }
             if (reply != null) {
                 try {
                     val payload = reply.toByteArray(StandardCharsets.UTF_8)
@@ -368,17 +418,17 @@ open class Stream4kController(context: Context) {
             return null
         }
         val type = map["type"] as? String ?: return null
+        if (isStreaming() && lastPeerAddress != null && peerAddress != lastPeerAddress) return null
         
         lastMessageTime = System.currentTimeMillis()
         
         return when (type) {
             "ping" -> {
-                val ladder = probeLadder()
                 val builder = StringBuilder()
                 builder.append("{\"version\":\"1.0\",\"type\":\"pong\",\"device_name\":\"Android Phone\",\"capabilities\":{\"ladder\":[")
-                builder.append("{\"width\":3840,\"height\":2160,\"fps\":60,\"bitrate\":35000000},")
-                builder.append("{\"width\":3840,\"height\":2160,\"fps\":30,\"bitrate\":25000000},")
-                builder.append("{\"width\":1920,\"height\":1080,\"fps\":60,\"bitrate\":12000000}")
+                builder.append(availableLadders().joinToString(",") {
+                    "{\"width\":${it.width},\"height\":${it.height},\"fps\":${it.fps},\"bitrate\":${it.bitrateBps}}"
+                })
                 builder.append("]},\"state\":\"${if (isStreaming()) "streaming" else "idle"}\"}")
                 builder.toString()
             }
@@ -389,8 +439,13 @@ open class Stream4kController(context: Context) {
                 val fps = (sel?.get("fps") as? Number)?.toInt() ?: 60
                 val streamPort = (map["stream_port"] as? Number)?.toInt() ?: 5004
                 
-                val resolved = resolveRequestedLadder(w, h, fps, 0)
-                if (resolved == null) {
+                val resolved = if (w == 0 && h == 0 && fps == 0) {
+                    val modes = availableLadders()
+                    modes.firstOrNull { it.width == 1920 && it.height == 1080 && it.fps == 60 }
+                        ?: modes.firstOrNull { it.width == 1920 && it.height == 1080 && it.fps == 30 }
+                        ?: modes.firstOrNull()
+                } else resolveRequestedLadder(w, h, fps, 0)
+                if (resolved == null || (streamPort !in 1..65535 && map["transport"] != "tcp")) {
                     "{\"version\":\"1.0\",\"type\":\"connect_ack\",\"status\":\"error\",\"reason\":\"unsupported_ladder\"}"
                 } else {
                     lastPeerAddress = peerAddress
@@ -401,7 +456,7 @@ open class Stream4kController(context: Context) {
                 }
             }
             "start" -> {
-                val ladder = activeLadder ?: resolveRequestedLadder(1920, 1080, 60, 0)!!
+                val ladder = activeLadder ?: return "{\"version\":\"1.0\",\"type\":\"start_ack\",\"status\":\"error\",\"reason\":\"connect_required\"}"
                 val ip = lastPeerAddress?.hostAddress ?: peerAddress.hostAddress
                 val port = lastPeerPort ?: 5004
                 val ok = start(ladder, ip, port)
@@ -493,47 +548,17 @@ open class Stream4kController(context: Context) {
     }
 
     internal fun getNextLowerLadder(current: Ladder): Ladder? {
-        val combos = try { probe.supportedCombos() } catch (e: Exception) { emptySet() }
-        val normalSession = try { probe.normalSessionCombos() } catch (e: Exception) { combos }
-        
-        if (current.width == 3840 && current.height == 2160 && current.fps == 60) {
-            val c4k30 = Triple(3840, 2160, 30)
-            if (c4k30 in combos) {
-                return Ladder(3840, 2160, 30, c4k30 !in normalSession, 25_000_000, "4K30 HEVC fallback")
-            }
-            val c1080p60 = Triple(1920, 1080, 60)
-            if (c1080p60 in combos) {
-                return Ladder(1920, 1080, 60, c1080p60 !in normalSession, 12_000_000, "1080p60 HEVC fallback")
-            }
-        } else if (current.width == 3840 && current.height == 2160 && current.fps == 30) {
-            val c1080p60 = Triple(1920, 1080, 60)
-            if (c1080p60 in combos) {
-                return Ladder(1920, 1080, 60, c1080p60 !in normalSession, 12_000_000, "1080p60 HEVC fallback")
-            }
-        }
-        return null
+        return availableLadders().filter { isLadderLowerThan(it, current) && it.bitrateBps < current.bitrateBps &&
+            (negotiatedLadder == null || it.fps <= negotiatedLadder!!.fps) }
+            .maxWithOrNull(compareBy<Ladder> { it.width }.thenBy { it.height }.thenBy { it.fps })
     }
 
     internal fun getNextHigherLadder(current: Ladder): Ladder? {
-        val combos = try { probe.supportedCombos() } catch (e: Exception) { emptySet() }
-        val normalSession = try { probe.normalSessionCombos() } catch (e: Exception) { combos }
-        
-        if (current.width == 1920 && current.height == 1080 && current.fps == 60) {
-            val c4k30 = Triple(3840, 2160, 30)
-            if (c4k30 in combos) {
-                return Ladder(3840, 2160, 30, c4k30 !in normalSession, 25_000_000, "4K30 HEVC fallback")
-            }
-            val c4k60 = Triple(3840, 2160, 60)
-            if (c4k60 in combos) {
-                return Ladder(3840, 2160, 60, c4k60 !in normalSession, 35_000_000, "4K60 HEVC")
-            }
-        } else if (current.width == 3840 && current.height == 2160 && current.fps == 30) {
-            val c4k60 = Triple(3840, 2160, 60)
-            if (c4k60 in combos) {
-                return Ladder(3840, 2160, 60, c4k60 !in normalSession, 35_000_000, "4K60 HEVC")
-            }
-        }
-        return null
+        val limit = negotiatedLadder
+        return availableLadders().filter {
+            isLadderLowerThan(current, it) && it.bitrateBps > current.bitrateBps &&
+                (limit == null || (!isLadderLowerThan(limit, it) && it.fps <= limit.fps))
+        }.minWithOrNull(compareBy<Ladder> { it.width }.thenBy { it.height }.thenBy { it.fps })
     }
 
     internal fun isLadderLowerThan(a: Ladder, b: Ladder): Boolean {
@@ -544,37 +569,10 @@ open class Stream4kController(context: Context) {
     }
 
     private fun resolveRequestedLadder(width: Int, height: Int, fps: Int, bitrateBps: Int): Ladder? {
-        val probed = probeLadder()
-        if (probed != null && probed.width == width && probed.height == height && probed.fps == fps) {
-            return probed
-        }
-        val combos = try {
-            probe.supportedCombos()
-        } catch (e: Exception) {
-            emptySet()
-        }
-        if (Triple(width, height, fps) in combos) {
-            val normalCombos = try {
-                probe.normalSessionCombos()
-            } catch (e: Exception) {
-                combos
-            }
-            return Ladder(
-                width = width,
-                height = height,
-                fps = fps,
-                needsHighSpeedSession = Triple(width, height, fps) !in normalCombos,
-                bitrateBps = if (bitrateBps > 0) bitrateBps else probed?.bitrateBps ?: DEFAULT_FALLBACK_BITRATE,
-                reason = "Requested ${width}x$height@$fps"
-            )
-        }
-        val clamped = probed?.takeIf {
-            it.width <= width && it.height <= height && it.fps <= fps
-        }
-        if (clamped != null) {
-            Log.i(TAG, "Control START clamped ${width}x$height@$fps -> ${clamped.summary}")
-        }
-        return clamped
+        if (width !in 1..3840 || height !in 1..2160 || fps !in 1..240) return null
+        val modes = availableLadders()
+        return modes.firstOrNull { it.width == width && it.height == height && it.fps == fps }
+            ?: modes.firstOrNull { it.width <= width && it.height <= height && it.fps <= fps }
     }
 
     companion object {

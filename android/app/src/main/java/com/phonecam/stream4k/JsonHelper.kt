@@ -1,7 +1,10 @@
 package com.phonecam.stream4k
 
 object JsonHelper {
-    fun parse(jsonStr: String): Map<String, Any> {
+    fun parse(jsonStr: String): Map<String, Any> = parseObject(jsonStr, 0)
+
+    private fun parseObject(jsonStr: String, depth: Int): Map<String, Any> {
+        require(jsonStr.length <= 65535 && depth < 16) { "Control JSON limit exceeded" }
         val result = mutableMapOf<String, Any>()
         val trimmed = jsonStr.trim()
         if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return result
@@ -13,7 +16,7 @@ object JsonHelper {
             val key = parts[0].trim().removeSurrounding("\"")
             val valStr = parts[1].trim()
             if (valStr.startsWith("{")) {
-                result[key] = parse(valStr)
+                result[key] = parseObject(valStr, depth + 1)
             } else if (valStr.startsWith("[")) {
                 result[key] = parseList(valStr)
             } else {

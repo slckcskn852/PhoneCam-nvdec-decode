@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Unified patches contain required leading spaces on blank context lines.
+desktop/windows/patches/*.patch -whitespace

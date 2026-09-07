@@ -38,16 +38,20 @@ open class HevcEncoder {
         fps: Int,
         iFrameIntervalSec: Int = 1,
         useCbr: Boolean = false,
-        persistentInputSurface: Surface? = null
+        persistentInputSurface: Surface? = null,
+        encoderName: String? = null
     ) {
         check(codec == null) { "HevcEncoder already configured" }
-        val encoder = createCodec(width, height, fps)
+        val encoder = if (encoderName != null) MediaCodec.createByCodecName(encoderName) else createCodec(width, height, fps)
+        codec = encoder
+        try {
         val format = buildFormat(width, height, bitrateBps, fps, iFrameIntervalSec, useCbr, true)
         try {
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (e: Exception) {
             // Some encoders reject an explicit profile/level. Retry without it.
             Log.w(TAG, "Encoder rejected profile/level, retrying without", e)
+            encoder.reset()
             encoder.configure(
                 buildFormat(width, height, bitrateBps, fps, iFrameIntervalSec, useCbr, false),
                 null,
@@ -63,7 +67,10 @@ open class HevcEncoder {
             ownsInputSurface = true
             encoder.createInputSurface()
         }
-        codec = encoder
+        } catch (error: Exception) {
+            release()
+            throw error
+        }
     }
 
     @Synchronized
@@ -80,7 +87,7 @@ open class HevcEncoder {
     @Synchronized
     fun stop() {
         running = false
-        drainThread?.join(1_000)
+        drainThread?.takeIf { it !== Thread.currentThread() }?.join()
         drainThread = null
         try {
             codec?.stop()
@@ -149,16 +156,21 @@ open class HevcEncoder {
                     } catch (e: Exception) {
                         null
                     }
-                    if (buffer != null && info.size > 0) {
-                        val bytes = ByteArray(info.size)
-                        buffer.position(info.offset)
-                        buffer.get(bytes, 0, info.size)
-                        handleOutputBuffer(bytes, info)
-                    }
                     try {
-                        encoder.releaseOutputBuffer(index, false)
-                    } catch (e: Exception) {
-                        if (running) callback?.onError("Encoder buffer release failed: ${e.message}")
+                        if (buffer != null && info.size > 0) {
+                            val bytes = ByteArray(info.size)
+                            buffer.position(info.offset)
+                            buffer.get(bytes, 0, info.size)
+                            handleOutputBuffer(bytes, info)
+                        }
+                    } catch (error: Exception) {
+                        if (running) callback?.onError("Encoder output failed: ${error.message}")
+                    } finally {
+                        try {
+                            encoder.releaseOutputBuffer(index, false)
+                        } catch (error: Exception) {
+                            if (running) callback?.onError("Encoder buffer release failed: ${error.message}")
+                        }
                     }
                 }
             }
@@ -200,6 +212,8 @@ open class HevcEncoder {
         )
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+        format.setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+        if (android.os.Build.VERSION.SDK_INT >= 29) format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameIntervalSec)
         format.setInteger(
             MediaFormat.KEY_BITRATE_MODE,
@@ -240,7 +254,7 @@ open class HevcEncoder {
         } catch (e: Exception) {
             Log.w(TAG, "Encoder scan failed, falling back to default", e)
         }
-        return MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+        throw IllegalStateException("No HEVC surface encoder supports ${width}x$height@$fps")
     }
 
     companion object {

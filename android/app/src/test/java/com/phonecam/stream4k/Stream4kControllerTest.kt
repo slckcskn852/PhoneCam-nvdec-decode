@@ -46,6 +46,39 @@ class Stream4kControllerTest {
     }
 
     @Test
+    fun reverseConnectionNegotiatesAutomaticAndReconnectsUntilStopped() {
+        val controller = TestStream4kController(FakeContext())
+        controller.probe = FakeCapabilitiesSource(setOf(Triple(1920, 1080, 60), Triple(3840, 2160, 60)))
+        controller.setForeground(true)
+        val server = java.net.ServerSocket(0, 2, InetAddress.getLoopbackAddress())
+        server.soTimeout = 5000
+        try {
+            controller.connectToReceiver("127.0.0.1", server.localPort)
+            repeat(2) {
+                server.accept().use { phone ->
+                    phone.soTimeout = 3000
+                    val input = java.io.DataInputStream(phone.getInputStream())
+                    val hello = ByteArray("PHONECAM/2\n".length); input.readFully(hello)
+                    assertEquals("PHONECAM/2\n", String(hello, Charsets.US_ASCII))
+                    val command = """{"type":"connect","selected_ladder":{"width":0,"height":0,"fps":0},"transport":"tcp","stream_port":0}""".toByteArray()
+                    val output = java.io.DataOutputStream(phone.getOutputStream())
+                    output.writeByte(1); output.writeByte(0); output.writeInt(command.size); output.write(command); output.flush()
+                    assertEquals(1, input.readUnsignedByte()); assertEquals(0, input.readUnsignedByte())
+                    val size = input.readInt(); assertTrue(size in 1..65535)
+                    val body = ByteArray(size); input.readFully(body)
+                    assertTrue(String(body).contains("success"))
+                    assertEquals(60, controller.negotiatedLadder!!.fps)
+                    assertEquals(1920, controller.negotiatedLadder!!.width)
+                }
+            }
+            controller.stop()
+            server.soTimeout = 3500
+            try { server.accept().close(); throw AssertionError("Stop allowed a reconnect") }
+            catch (_: java.net.SocketTimeoutException) { }
+        } finally { controller.stop(); server.close() }
+    }
+
+    @Test
     fun testNegotiatedLadderIsSaved() {
         val controller = TestStream4kController(FakeContext())
         controller.probe = FakeCapabilitiesSource(

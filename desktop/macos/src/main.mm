@@ -4,6 +4,8 @@
 #import <CoreVideo/CoreVideo.h>
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreImage/CoreImage.h>
+#include <cstring>
 #include "phonecam_client.h"
 #include "control_parser.h"
 #include "discovery.h"
@@ -57,6 +59,7 @@ public:
 
     void reset() {
         if (session_) {
+            VTDecompressionSessionWaitForAsynchronousFrames(session_);
             VTDecompressionSessionInvalidate(session_);
             CFRelease(session_);
             session_ = nullptr;
@@ -115,14 +118,17 @@ public:
             uint8_t type = (nalData[0] >> 1) & 0x3F;
 
             if (type == 32) { // VPS
-                vps_.assign(nalData, nalData + nalLen);
-                hasParameterSets = true;
+                std::vector<uint8_t> incoming(nalData, nalData + nalLen);
+                hasParameterSets |= incoming != vps_;
+                vps_ = std::move(incoming);
             } else if (type == 33) { // SPS
-                sps_.assign(nalData, nalData + nalLen);
-                hasParameterSets = true;
+                std::vector<uint8_t> incoming(nalData, nalData + nalLen);
+                hasParameterSets |= incoming != sps_;
+                sps_ = std::move(incoming);
             } else if (type == 34) { // PPS
-                pps_.assign(nalData, nalData + nalLen);
-                hasParameterSets = true;
+                std::vector<uint8_t> incoming(nalData, nalData + nalLen);
+                hasParameterSets |= incoming != pps_;
+                pps_ = std::move(incoming);
             } else {
                 size_t currentOffset = sampleBufferData.size();
                 sampleBufferData.resize(currentOffset + 4 + nalLen);
@@ -134,7 +140,7 @@ public:
             }
         }
 
-        if (hasParameterSets && !vps_.empty() && !sps_.empty() && !pps_.empty()) {
+        if ((hasParameterSets || !session_) && !vps_.empty() && !sps_.empty() && !pps_.empty()) {
             recreateSession();
         }
 
@@ -192,7 +198,8 @@ public:
         CFRelease(blockBuffer);
         if (status != noErr) return;
 
-        VTDecodeFrameFlags flags = kVTDecodeFrame_EnableAsynchronousDecompression;
+        // Synchronous submission bounds decoded surfaces when the consumer stalls.
+        VTDecodeFrameFlags flags = 0;
         VTDecodeInfoFlags infoFlagsOut;
         VTDecompressionSessionDecodeFrame(
             session_,
@@ -211,6 +218,7 @@ private:
             formatDesc_ = nullptr;
         }
         if (session_) {
+            VTDecompressionSessionWaitForAsynchronousFrames(session_);
             VTDecompressionSessionInvalidate(session_);
             CFRelease(session_);
             session_ = nullptr;
@@ -293,13 +301,19 @@ private:
     std::vector<uint8_t> pps_;
 };
 
-@interface PreviewView : NSView
+@interface PreviewView : NSView {
+    std::atomic<bool> updatePending_;
+    CIContext* imageContext_;
+}
+- (void)updateFrame:(CVPixelBufferRef)pixelBuffer;
 @end
 
 @implementation PreviewView
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
+        updatePending_ = false;
+        imageContext_ = [CIContext contextWithOptions:nil];
         self.wantsLayer = YES;
         self.layer.contentsGravity = kCAGravityResizeAspect;
     }
@@ -307,8 +321,15 @@ private:
 }
 
 - (void)updateFrame:(CVPixelBufferRef)pixelBuffer {
+    if (updatePending_.exchange(true)) return;
+    CVPixelBufferRetain(pixelBuffer);
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.layer.contents = (__bridge id)pixelBuffer;
+        CIImage* image = [CIImage imageWithCVPixelBuffer:pixelBuffer];
+        CGImageRef rendered = [imageContext_ createCGImage:image fromRect:image.extent];
+        self.layer.contents = (__bridge id)rendered;
+        if (rendered) CGImageRelease(rendered);
+        CVPixelBufferRelease(pixelBuffer);
+        updatePending_ = false;
     });
 }
 @end
@@ -436,11 +457,7 @@ private:
         double finalAvgNetworkFps = totalDuration > 0.0 ? (double)totalFramesReceived / totalDuration : 0.0;
         double finalAvgFrameAge = totalFrameAgeCount > 0 ? totalFrameAgeMsSum / totalFrameAgeCount : 0.0;
         
-        if (gOptions.fps >= 60) {
-            if (finalAvgDecodeFps < 55.0) success = false;
-        } else {
-            if (finalAvgDecodeFps < 0.9 * gOptions.fps) success = false;
-        }
+        if (finalAvgDecodeFps < 0.9 * gOptions.fps) success = false;
         if (lastLossPercent >= 1.0) success = false;
         
         std::cout << "\n{\"duration_sec\": " << std::fixed << std::setprecision(1) << totalDuration
@@ -464,6 +481,7 @@ private:
     if (statsThread_.joinable()) {
         statsThread_.join();
     }
+    decoder_.reset();
     std::exit(exitCode_);
 }
 
@@ -560,11 +578,7 @@ int runHeadless() {
     double finalAvgNetworkFps = totalDuration > 0.0 ? (double)totalFramesReceived / totalDuration : 0.0;
     double finalAvgFrameAge = totalFrameAgeCount > 0 ? totalFrameAgeMsSum / totalFrameAgeCount : 0.0;
     
-    if (gOptions.fps >= 60) {
-        if (finalAvgDecodeFps < 55.0) success = false;
-    } else {
-        if (finalAvgDecodeFps < 0.9 * gOptions.fps) success = false;
-    }
+    if (finalAvgDecodeFps < 0.9 * gOptions.fps) success = false;
     if (lastLossPercent >= 1.0) success = false;
     
     std::cout << "\n{\"duration_sec\": " << std::fixed << std::setprecision(1) << totalDuration

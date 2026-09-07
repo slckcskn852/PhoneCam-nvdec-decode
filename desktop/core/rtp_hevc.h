@@ -49,6 +49,9 @@ public:
 
   // Release every buffered packet in order and emit any pending access unit.
   void flushAll();
+  // Only call when the feed thread has stopped. Keeps callbacks installed.
+  void reset();
+  static constexpr size_t kMaxAccessUnitBytes = 8 * 1024 * 1024;
 
   // Counters since the previous call. The jitter estimate is a running state
   // variable and is not reset.
@@ -84,6 +87,7 @@ private:
   // Current access unit under assembly.
   std::vector<uint8_t> auBuffer_;
   bool auActive_ = false;
+  bool auDamaged_ = false;
   uint32_t auTimestamp_ = 0;
   std::chrono::steady_clock::time_point auStarted_{};
 

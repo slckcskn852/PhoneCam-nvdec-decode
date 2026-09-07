@@ -3,6 +3,19 @@ import XCTest
 
 final class PhoneCamSendTests: XCTestCase {
 
+    func testSharedReceiverAddressVectors() {
+        for (code, ip) in [("PC-R2M0-2AGG", "192.168.1.42"), ("PC-1800-01F7", "10.0.0.5"), ("PC-NG80-G2A2", "172.16.8.9")] {
+            XCTAssertEqual(ReceiverAddress.parse(code)?.host, ip)
+            XCTAssertEqual(ReceiverAddress.parse(code)?.port, 47823)
+        }
+        XCTAssertEqual(ReceiverAddress.parse(" pc-r2m0-2agg ")?.host, "192.168.1.42")
+        XCTAssertNil(ReceiverAddress.parse("PC-R2M0-2AGH"))
+        XCTAssertEqual(ReceiverAddress.parse("pc.local:12345")?.port, 12345)
+        XCTAssertNil(ReceiverAddress.parse("pc.local:0"))
+        XCTAssertNil(ReceiverAddress.parse("pc.local:65536"))
+        XCTAssertNil(ReceiverAddress.parse("https://pc.local"))
+    }
+
     private func nal(type: Int, size: Int) -> Data {
         var bytes = Data(repeating: 0, count: size)
         bytes[0] = UInt8((type << 1) & 0xFF)
@@ -281,4 +294,26 @@ final class PhoneCamSendTests: XCTestCase {
         XCTAssertTrue((fuHdr & 0x40) != 0) // End bit set
         XCTAssertEqual(fuHdr & 0x3F, 19) // original NAL unit type 19
     }
+    func testEveryFragmentIsCachedAfterPayloadConstruction() {
+        let packetizer = RtpSwiftPacketizer()
+        let packets = packetizer.packetize(accessUnit: annexB(nal(type: 19, size: 9000)), ptsUs: 1_000_000)
+        XCTAssertGreaterThan(packets.count, 1)
+        for packet in packets {
+            let seq = (Int(packet[2]) << 8) | Int(packet[3])
+            XCTAssertEqual(packetizer.getPacket(seq: seq), packet)
+        }
+        XCTAssertNil(packetizer.getPacket(seq: -1))
+        XCTAssertNil(packetizer.getPacket(seq: 65536))
+    }
+
+    func testHighFrameRateTimestampsRemainCaptureTimestamps() {
+        for fps: Int64 in [120, 240] {
+            let packetizer = RtpSwiftPacketizer()
+            let packets = packetizer.packetize(accessUnit: annexB(nal(type: 19, size: 10)), ptsUs: 1_000_000 / fps)
+            let packet = packets[0]
+            let timestamp = (UInt32(packet[4]) << 24) | (UInt32(packet[5]) << 16) | (UInt32(packet[6]) << 8) | UInt32(packet[7])
+            XCTAssertLessThanOrEqual(abs(Int(timestamp) - Int(90_000 / fps)), 1)
+        }
+    }
+
 }

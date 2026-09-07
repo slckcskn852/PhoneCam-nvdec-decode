@@ -1,7 +1,7 @@
 param(
   [string]$Destination = "C:\deps\phonecam-softcam",
   [string]$Repository = "https://github.com/tshino/softcam.git",
-  [string]$Revision = "main",
+  [string]$Revision = "e89a699ed9932c74f57afe4f396be89665967e00",
   [string]$Configuration = "Release",
   [string]$Platform = "x64",
   [switch]$Register
@@ -48,6 +48,15 @@ Push-Location $Destination
 try {
   git fetch --tags origin
   git checkout $Revision
+  if ($LASTEXITCODE -ne 0) { throw "Softcam checkout failed" }
+  $patch = Join-Path $PSScriptRoot "..\patches\softcam-high-fps.patch"
+  git apply --reverse --check $patch 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    git apply --check $patch
+    if ($LASTEXITCODE -ne 0) { throw "Softcam revision does not match the reviewed performance patch" }
+    git apply $patch
+    if ($LASTEXITCODE -ne 0) { throw "Softcam performance patch failed" }
+  }
 
   $softcamCpp = Join-Path $Destination "src\softcam\softcam.cpp"
   $dshowCpp = Join-Path $Destination "src\softcamcore\DShowSoftcam.cpp"

@@ -1,118 +1,100 @@
 package com.phonecam.stream4k
 
 import android.util.Log
+import java.io.BufferedOutputStream
 import java.io.DataOutputStream
-import java.io.IOException
 import java.net.Socket
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
+/** One writer owns the stream. Media is queued atomically by access unit. */
 class TcpStreamSender(
     private val socket: Socket,
     private val onStats: ((UdpStreamSender.Stats) -> Unit)? = null
 ) {
-    private data class QueuedPacket(val channel: Byte, val data: ByteArray)
-
-    private val queue = ArrayBlockingQueue<QueuedPacket>(QUEUE_CAPACITY)
+    private data class Batch(val channel: Int, val packets: List<ByteArray>) {
+        val bytes: Long = packets.sumOf { it.size.toLong() + 6 }
+    }
+    private val queue = ArrayBlockingQueue<Batch>(8)
+    private val queuedBytes = AtomicLong()
     @Volatile private var running = false
     private var senderThread: Thread? = null
-    private val outputStream = DataOutputStream(socket.getOutputStream())
+    private val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
 
     fun start() {
         if (running) return
+        socket.tcpNoDelay = true
         running = true
-        queue.clear()
-        senderThread = Thread({ sendLoop() }, "PhoneCamTcpSender").apply {
-            isDaemon = true
-            start()
-        }
+        senderThread = Thread({ sendLoop() }, "PhoneCamTcpSender").apply { isDaemon = true; start() }
     }
 
     fun stop() {
         running = false
+        // Closing the socket unblocks a writer whose peer has stopped reading.
+        try { socket.close() } catch (_: Exception) { }
         senderThread?.interrupt()
+        senderThread?.takeIf { it !== Thread.currentThread() }?.join()
         senderThread = null
-        try {
-            socket.close()
-        } catch (e: Exception) {
-            // ignore
-        }
         queue.clear()
+        queuedBytes.set(0)
     }
 
-    /** Called on encoder or control thread. Never blocks. */
-    fun sendFrame(channel: Byte, data: ByteArray) {
-        if (!running) return
-        if (!queue.offer(QueuedPacket(channel, data))) {
-            queue.poll()
-            queue.offer(QueuedPacket(channel, data))
+    fun sendFrame(channel: Byte, data: ByteArray) = enqueue(Batch(channel.toInt(), listOf(data)))
+    fun sendAccessUnit(packets: List<ByteArray>) = enqueue(Batch(2, packets))
+
+    private fun enqueue(batch: Batch) {
+        if (!running || batch.packets.isEmpty()) return
+        if (batch.packets.any { it.isEmpty() || it.size > 65535 } ||
+            queuedBytes.addAndGet(batch.bytes) > MAX_QUEUED_BYTES || !queue.offer(batch)) {
+            // Never discard an arbitrary RTP fragment or a control response. Once
+            // reliable delivery cannot keep up, disconnect and renegotiate a lower mode.
+            running = false
+            try { socket.close() } catch (_: Exception) { }
         }
     }
 
     private fun sendLoop() {
-        var windowStartMs = System.currentTimeMillis()
+        var start = System.nanoTime()
+        var frames = 0L
+        var packets = 0L
+        var bytes = 0L
         var windowFrames = 0L
         var windowBytes = 0L
-        var framesSent = 0L
-        var packetsSent = 0L
-        var bytesSent = 0L
-
-        while (running) {
-            val packet = try {
-                queue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
-            } catch (e: InterruptedException) {
-                null
-            } ?: continue
-
-            try {
-                // Header: Channel (1 byte), Reserved (1 byte), Length (4 bytes)
-                outputStream.writeByte(packet.channel.toInt())
-                outputStream.writeByte(0)
-                outputStream.writeInt(packet.data.size)
-                outputStream.write(packet.data)
+        try {
+            while (running) {
+                val batch = queue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                queuedBytes.addAndGet(-batch.bytes)
+                for (packet in batch.packets) {
+                    outputStream.writeByte(batch.channel)
+                    outputStream.writeByte(0)
+                    outputStream.writeInt(packet.size)
+                    outputStream.write(packet)
+                    packets++
+                    bytes += packet.size + 6
+                    windowBytes += packet.size + 6
+                }
                 outputStream.flush()
-
-                packetsSent++
-                val size = 6 + packet.data.size
-                bytesSent += size
-                windowBytes += size
-                if (packet.channel == 2.toByte()) {
-                    val rtp = packet.data
-                    if (rtp.size >= 12 && (rtp[1].toInt() and 0x80 != 0)) {
-                        framesSent++
-                        windowFrames++
-                    }
-                }
-            } catch (e: IOException) {
-                Log.e(TAG, "TCP send failed, closing connection", e)
-                running = false
-                break
-            }
-
-            val nowMs = System.currentTimeMillis()
-            val elapsedMs = nowMs - windowStartMs
-            if (elapsedMs >= 1_000) {
-                val stats = UdpStreamSender.Stats(
-                    framesSent = framesSent,
-                    packetsSent = packetsSent,
-                    bytesSent = bytesSent,
-                    droppedFrames = 0,
-                    fps = (windowFrames * 1_000 / elapsedMs).toInt(),
-                    mbps = windowBytes * 8.0 * 1_000 / (elapsedMs * 1_000_000.0)
-                )
-                windowStartMs = nowMs
-                windowFrames = 0
-                windowBytes = 0
-                try {
-                    onStats?.invoke(stats)
-                } catch (e: Exception) {
-                    // ignore
+                if (batch.channel == 2) { frames++; windowFrames++ }
+                val elapsed = (System.nanoTime() - start) / 1_000_000L
+                if (elapsed >= 1000) {
+                    onStats?.invoke(UdpStreamSender.Stats(frames, packets, bytes, 0,
+                        (windowFrames * 1000 / elapsed).toInt(), windowBytes * 8.0 / (elapsed * 1000)))
+                    start = System.nanoTime(); windowFrames = 0; windowBytes = 0
                 }
             }
+        } catch (error: Exception) {
+            if (running) Log.w(TAG, "TCP writer disconnected", error)
+        } finally {
+            running = false
+            try { socket.close() } catch (_: Exception) { }
+            queue.clear()
+            queuedBytes.set(0)
         }
     }
 
     companion object {
         private const val TAG = "TcpStreamSender"
-        private const val QUEUE_CAPACITY = 128
+        private const val MAX_QUEUED_BYTES = 16 * 1024 * 1024L
     }
 }

@@ -45,21 +45,43 @@ public class ControlClient {
     private var tcpConnection: NWConnection?
     
     private let queue = DispatchQueue(label: "com.phonecam.stream4k.control")
+    private let queueKey = DispatchSpecificKey<Bool>()
+    private let sendLock = NSLock()
+    private var tcpBytesInFlight = 0
+    private var tcpOverloaded = false
+    private var udpConnection: NWConnection?
     private var running = false
+    private var receiverEndpoint: NWEndpoint?
+    private var connectionGeneration = 0
+    public var onConnectionStatus: ((String) -> Void)?
     private var lastMessageTime: Date = Date()
     private var keepaliveTimer: DispatchSourceTimer?
     
-    public let availableLadders: [Ladder] = [
+    public static let candidateLadders: [Ladder] = [
         Ladder(width: 3840, height: 2160, fps: 60, bitrateBps: 35_000_000, name: "4K60 HEVC"),
         Ladder(width: 3840, height: 2160, fps: 30, bitrateBps: 25_000_000, name: "4K30 HEVC fallback"),
-        Ladder(width: 1920, height: 1080, fps: 60, bitrateBps: 12_000_000, name: "1080p60 HEVC fallback")
+        Ladder(width: 1920, height: 1080, fps: 240, bitrateBps: 45_000_000, name: "1080p240 HEVC"),
+        Ladder(width: 1920, height: 1080, fps: 120, bitrateBps: 28_000_000, name: "1080p120 HEVC"),
+        Ladder(width: 1920, height: 1080, fps: 60, bitrateBps: 12_000_000, name: "1080p60 HEVC fallback"),
+        Ladder(width: 1920, height: 1080, fps: 30, bitrateBps: 8_000_000, name: "1080p30 HEVC fallback")
     ]
     
-    public init() {}
+    public private(set) var availableLadders: [Ladder] = []
+    public private(set) var mediaHost: String?
+    public private(set) var mediaPort: UInt16 = 5004
+
+    public init() { queue.setSpecific(key: queueKey, value: true) }
+
+    private func onQueue<T>(_ action: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) == true { return action() }
+        return queue.sync(execute: action)
+    }
     
-    public func start() {
+    public func start() { onQueue { startOnQueue() } }
+    private func startOnQueue() {
         guard !running else { return }
         running = true
+        availableLadders = CaptureEncoder.availableLadders()
         
         lastMessageTime = Date()
         startUdpListener()
@@ -67,8 +89,38 @@ public class ControlClient {
         startKeepaliveMonitor()
     }
     
-    public func stop() {
+    public func connect(to endpoint: NWEndpoint) { onQueue {
+        stopOnQueue()
+        running = true
+        availableLadders = CaptureEncoder.availableLadders()
+        receiverEndpoint = endpoint
+        startKeepaliveMonitor()
+        connectReceiverOnQueue()
+    } }
+
+    private func connectReceiverOnQueue() {
+        guard running, let endpoint = receiverEndpoint, tcpConnection == nil else { return }
+        onConnectionStatus?("Connecting to computer… Keep the receiver open.")
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let connection = NWConnection(to: endpoint, using: NWParameters(tls: nil, tcp: tcp))
+        handleTcpConnection(connection, reverse: true)
+        queue.asyncAfter(deadline: .now() + 5) { [weak self, weak connection] in
+            guard let self = self, let connection = connection, self.tcpConnection === connection else { return }
+            if case .ready = connection.state { return }
+            connection.cancel()
+        }
+    }
+
+    public func stop() { onQueue { stopOnQueue() } }
+    private func stopOnQueue() {
         running = false
+        receiverEndpoint = nil
+        connectionGeneration += 1
+        udpConnection?.cancel()
+        udpConnection = nil
+        activeLadder = nil
+        negotiatedLadder = nil
         
         udpListener?.cancel()
         udpListener = nil
@@ -83,29 +135,46 @@ public class ControlClient {
         keepaliveTimer = nil
     }
     
-    public func sendTcpMedia(packet: Data) {
-        guard let connection = tcpConnection else { return }
-        var header = Data(count: 6)
-        header[0] = 0x02 // Media Channel
-        header[1] = 0x00 // Reserved
-        let length = UInt32(packet.count)
-        header[2] = UInt8((length >> 24) & 0xFF)
-        header[3] = UInt8((length >> 16) & 0xFF)
-        header[4] = UInt8((length >> 8) & 0xFF)
-        header[5] = UInt8(length & 0xFF)
-        
-        let frame = header + packet
-        connection.send(content: frame, completion: .contentProcessed({ error in
-            if let error = error {
-                print("ControlClient: TCP media send failed: \(error)")
+    // One enqueue and NWConnection send per access unit, preserving all RTP boundaries.
+    public func sendTcpMedia(packets: [Data]) {
+        guard !packets.isEmpty, packets.allSatisfy({ !$0.isEmpty && $0.count <= 65535 }) else { return }
+        let bytes = packets.reduce(0) { $0 + $1.count + 6 }
+        sendLock.lock()
+        guard !tcpOverloaded else { sendLock.unlock(); return }
+        if tcpBytesInFlight + bytes > 4 * 1024 * 1024 {
+            tcpOverloaded = true
+            sendLock.unlock()
+            queue.async { [weak self] in self?.tcpConnection?.cancel() }
+            return
+        }
+        tcpBytesInFlight += bytes
+        sendLock.unlock()
+        // Snapshot the session before enqueuing so old camera frames cannot enter a new session.
+        let generation = onQueue { connectionGeneration }
+        var frame = Data(capacity: bytes)
+        for packet in packets {
+            frame.append(contentsOf: [2, 0])
+            var length = UInt32(packet.count).bigEndian
+            withUnsafeBytes(of: &length) { frame.append(contentsOf: $0) }
+            frame.append(packet)
+        }
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            guard self.running, self.connectionGeneration == generation, let connection = self.tcpConnection else {
+                self.releaseSendBytes(bytes); return
             }
-        }))
+            connection.send(content: frame, completion: .contentProcessed { [weak self] error in
+                self?.releaseSendBytes(bytes)
+                if error != nil { connection.cancel() }
+            })
+        }
     }
-    
-    public var isTcpConnected: Bool {
-        return tcpConnection != nil
+    private func releaseSendBytes(_ bytes: Int) {
+        sendLock.lock(); tcpBytesInFlight -= bytes; sendLock.unlock()
     }
-    
+    public var isTcpConnected: Bool { onQueue { tcpConnection != nil } }
+    public var destination: (String, UInt16)? { onQueue { mediaHost.map { ($0, mediaPort) } } }
+
     private func startUdpListener() {
         do {
             let listener = try NWListener(using: .udp, on: NWEndpoint.Port(rawValue: Self.controlPort)!)
@@ -122,7 +191,9 @@ public class ControlClient {
     
     private func startTcpListener() {
         do {
-            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.controlPort)!)
+            let tcp = NWProtocolTCP.Options()
+            tcp.noDelay = true
+            let listener = try NWListener(using: NWParameters(tls: nil, tcp: tcp), on: NWEndpoint.Port(rawValue: Self.controlPort)!)
             listener.newConnectionHandler = { [weak self] connection in
                 self?.handleTcpConnection(connection)
             }
@@ -135,10 +206,12 @@ public class ControlClient {
     }
     
     private func handleUdpConnection(_ connection: NWConnection) {
-        connection.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
-                print("ControlClient: UDP connection error: \(error)")
-            }
+        guard running, udpConnection == nil, tcpConnection == nil else { connection.cancel(); return }
+        udpConnection = connection
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self = self, let connection = connection, self.udpConnection === connection else { return }
+            if case .failed = state { self.udpConnection = nil }
+            if case .cancelled = state { self.udpConnection = nil }
         }
         connection.start(queue: queue)
         receiveUdpPacket(connection)
@@ -146,10 +219,10 @@ public class ControlClient {
     
     private func receiveUdpPacket(_ connection: NWConnection) {
         connection.receiveMessage { [weak self] (content: Data?, context: NWConnection.ContentContext?, isComplete: Bool, error: NWError?) in
-            guard let self = self, self.running else { return }
+            guard let self = self, self.running, self.udpConnection === connection else { return }
             if let data = content, !data.isEmpty {
                 self.lastMessageTime = Date()
-                if let response = self.processControlMessage(data) {
+                if let response = self.processControlMessage(data, peer: connection.endpoint) {
                     connection.send(content: response, completion: .contentProcessed({ _ in }))
                 }
             }
@@ -159,30 +232,44 @@ public class ControlClient {
         }
     }
     
-    private func handleTcpConnection(_ connection: NWConnection) {
-        tcpConnection?.cancel()
+    private func handleTcpConnection(_ connection: NWConnection, reverse: Bool = false) {
+        guard running, tcpConnection == nil, udpConnection == nil else { connection.cancel(); return }
+        sendLock.lock(); tcpOverloaded = false; sendLock.unlock()
+        connectionGeneration += 1
         tcpConnection = connection
-        
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self = self else { return }
+        lastMessageTime = Date()
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self = self, let connection = connection, self.tcpConnection === connection else { return }
             switch state {
-            case .failed(let error):
-                print("ControlClient: TCP connection error: \(error)")
+            case .ready:
+                if reverse {
+                    connection.send(content: Data("PHONECAM/2\n".utf8), completion: .contentProcessed { error in
+                        if error != nil { connection.cancel() }
+                        else { self.receiveTcpFrame(connection) }
+                    })
+                } else { self.receiveTcpFrame(connection) }
+            case .failed, .cancelled:
                 self.tcpConnection = nil
-            case .cancelled:
-                print("ControlClient: TCP connection cancelled")
-                self.tcpConnection = nil
-            default:
-                break
+                self.activeLadder = nil
+                self.connectionGeneration += 1
+                let token = self.connectionGeneration
+                DispatchQueue.main.async { self.delegate?.controlClientDidReceiveStop(self) }
+                if self.running, self.receiverEndpoint != nil {
+                    self.onConnectionStatus?("Connection lost. Reconnecting… Check the PC code and allow home-network access on the computer.")
+                    self.queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+                        guard let self = self, self.connectionGeneration == token else { return }
+                        self.connectReceiverOnQueue()
+                    }
+                }
+            default: break
             }
         }
         connection.start(queue: queue)
-        receiveTcpFrame(connection)
     }
-    
+
     private func receiveTcpFrame(_ connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 6, maximumLength: 6) { [weak self] (content: Data?, context: NWConnection.ContentContext?, isComplete: Bool, error: NWError?) in
-            guard let self = self, self.running, let header = content, header.count == 6 else {
+            guard let self = self, self.running, self.tcpConnection === connection, let header = content, header.count == 6 else {
                 connection.cancel()
                 return
             }
@@ -193,15 +280,19 @@ public class ControlClient {
                          (UInt32(header[4]) << 8) |
                          UInt32(header[5])
             
+            guard channel == 1, header[1] == 0, length > 0, length <= 65535 else {
+                connection.cancel()
+                return
+            }
             connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { [weak self] (payload: Data?, context: NWConnection.ContentContext?, isComplete: Bool, error: NWError?) in
-                guard let self = self, self.running, let body = payload, body.count == Int(length) else {
+                guard let self = self, self.running, self.tcpConnection === connection, let body = payload, body.count == Int(length) else {
                     connection.cancel()
                     return
                 }
                 
                 self.lastMessageTime = Date()
                 if channel == 0x01 { // Control
-                    if let response = self.processControlMessage(body) {
+                    if let response = self.processControlMessage(body, peer: connection.endpoint) {
                         var respHeader = Data(count: 6)
                         respHeader[0] = 0x01
                         respHeader[1] = 0x00
@@ -223,8 +314,8 @@ public class ControlClient {
         }
     }
     
-    private func processControlMessage(_ data: Data) -> Data? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    private func processControlMessage(_ data: Data, peer: NWEndpoint) -> Data? {
+        guard data.count <= 65535, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else {
             return nil
         }
@@ -254,7 +345,18 @@ public class ControlClient {
                let h = selected["height"] as? Int,
                let fps = selected["fps"] as? Int {
                 
-                if let matched = availableLadders.first(where: { $0.width == w && $0.height == h && $0.fps == fps }) {
+                let requestedPort = json["stream_port"] as? Int ?? 5004
+                let isTcp = (json["transport"] as? String) == "tcp"
+                guard isTcp || (1...65535).contains(requestedPort) else { return nil }
+                if case .hostPort(let host, _) = peer { mediaHost = "\(host)" }
+                else if isTcp { mediaHost = "localhost" } // TCP uses the existing connection, not a UDP destination.
+                else { return nil }
+                mediaPort = isTcp ? 5004 : UInt16(requestedPort)
+                let automatic = w == 0 && h == 0 && fps == 0
+                let preferred = availableLadders.first { $0.width == 1920 && $0.height == 1080 && $0.fps == 60 }
+                    ?? availableLadders.first { $0.width == 1920 && $0.height == 1080 && $0.fps == 30 }
+                    ?? availableLadders.first
+                if let matched = automatic ? preferred : availableLadders.first(where: { $0.width == w && $0.height == h && $0.fps == fps }) {
                     activeLadder = matched
                     negotiatedLadder = matched
                     currentBitrate = matched.bitrateBps
@@ -421,6 +523,9 @@ public class ControlClient {
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             if self.activeLadder != nil && Date().timeIntervalSince(self.lastMessageTime) > 5.0 {
+                self.tcpConnection?.cancel()
+                self.udpConnection?.cancel()
+                self.udpConnection = nil
                 print("ControlClient: Keepalive timeout. Stopping stream.")
                 self.activeLadder = nil
                 DispatchQueue.main.async {
